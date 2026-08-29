@@ -292,14 +292,20 @@ async def on_ready():
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     try:
-        # Делаем как с /основа - мгновенная синхронизация для твоей гильдии + глобально
+        # Фикс дублей: оставляем только гильдейские (мгновенно) чтобы не было x2
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
+            # 1. Скопировать глобальные в гильдию и засинкать (мгновенно)
             bot.tree.copy_global_to(guild=guild)
             synced_guild = await bot.tree.sync(guild=guild)
             print(f"Синхронизировано для гильдии {config.GUILD_ID}: {len(synced_guild)} команд")
-        synced = await bot.tree.sync()
-        print(f"Синхронизировано глобально {len(synced)} команд")
+            # 2. Очистить глобальные чтобы не дублировались (оставить только гильдейские)
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
+            print("Глобальные команды очищены (остались только гильдейские, без дублей)")
+        else:
+            synced = await bot.tree.sync()
+            print(f"Синхронизировано глобально {len(synced)} команд")
     except Exception as e:
         print(f"Ошибка синхронизации: {e}")
 
