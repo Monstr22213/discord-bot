@@ -1,0 +1,6 @@
+services:
+  - type: worker
+    name: discord-auth-bot
+    env: docker
+    plan: free
+    autoDeploy: false
