@@ -1078,21 +1078,26 @@ async def quest_dima(interaction: discord.Interaction):
 
 @bot.tree.command(name="нашел", description="Проверить квест любимая Димы")
 async def found_dima(interaction: discord.Interaction):
+    # Деферим сразу чтобы не было 404 Unknown interaction (этап 2 создает каналы >3 сек)
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except:
+        pass
     guild = interaction.guild
     data = load_quest()
     q = data.get(str(guild.id))
     if not q:
-        await interaction.response.send_message("❌ Квест не запущен. Нажми в #профиль `Начать квест Димы`", ephemeral=True)
+        await interaction.followup.send("❌ Квест не запущен. Нажми в #профиль `Начать квест Димы`", ephemeral=True)
         return
     ch_id = interaction.channel.id
     if ch_id not in q["channels"]:
-        await interaction.response.send_message("❌ Тут нет любимой Димы, ищи дальше!", ephemeral=True)
+        await interaction.followup.send("❌ Тут нет любимой Димы, ищи дальше!", ephemeral=True)
         return
     uid = str(interaction.user.id)
     if uid not in q["found"]:
         q["found"][uid] = []
     if ch_id in q["found"][uid]:
-        await interaction.response.send_message("Ты уже находил тут!", ephemeral=True)
+        await interaction.followup.send("Ты уже находил тут!", ephemeral=True)
         return
     q["found"][uid].append(ch_id)
     save_quest(data)
@@ -1100,7 +1105,7 @@ async def found_dima(interaction: discord.Interaction):
     stage = q.get("stage", 1)
     left = len(q["channels"]) - len(q["found"][uid])
     if left > 0:
-        await interaction.response.send_message(f"💖 Нашел! (Этап {stage}/3) Осталось {left} шт. Ищи дальше!")
+        await interaction.followup.send(f"💖 Нашел! (Этап {stage}/3) Осталось {left} шт. Ищи дальше!", ephemeral=True)
         return
     # Нашел все в этом этапе
     add_spermi(interaction.user.id, 500)
@@ -1153,14 +1158,14 @@ async def found_dima(interaction: discord.Interaction):
                         await ch.delete(reason=f"Квест этап {stage} завершен")
                     except:
                         pass
-            await interaction.response.send_message(f"🎉 Этап {stage} пройден! +500 💦 и {role.mention if role else ''}\n➡️ Этап {stage+1}/3 заспавнился: {', '.join([c.mention for c in new_channels])} — ищи там!", ephemeral=True)
+            await interaction.followup.send(f"🎉 Этап {stage} пройден! +500 💦 и {role.mention if role else ''}\n➡️ Этап {stage+1}/3 заспавнился: {', '.join([c.mention for c in new_channels])} — ищи там!", ephemeral=True)
             return
         # Если не создались - просто сброс
         save_quest(data)
-        await interaction.response.send_message(f"🎉 Этап {stage} пройден! +500 💦", ephemeral=True)
+        await interaction.followup.send(f"🎉 Этап {stage} пройден! +500 💦", ephemeral=True)
     else:
         # Финал 3/3 - удаляем каналы квеста
-        await interaction.response.send_message(f"🏆 ФИНАЛ! Ты нашел все 3 этапа! +500 💦 и {role.mention if role else ''}\nКаналы квеста удалятся через 5 сек...", ephemeral=True)
+        await interaction.followup.send(f"🏆 ФИНАЛ! Ты нашел все 3 этапа! +500 💦 и {role.mention if role else ''}\nКаналы квеста удалятся через 5 сек...", ephemeral=True)
         # Удаляем каналы через задержку
         import asyncio
         await asyncio.sleep(5)
