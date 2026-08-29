@@ -48,7 +48,7 @@ def add_spermi(user_id: int, amount: int):
 SHOP_ITEMS = {
     "бронь_от_дрона": {"price": 500, "desc": "Защита от дроноеба на 1 день", "role": None},
     "любимая_димы": {"price": 1000, "desc": "Роль Любимая Димы 💖 (легендарка)", "role": "Любимая Димы"},
-    "глава_дроноеба": {"price": 777, "desc": "Роль Глава Дроноеба 🚁", "role": "Глава Дроноеба"},
+    "раб_дроноеб": {"price": 777, "desc": "Роль Раб дроноеб 🚁", "role": "Раб дроноеб"},
     "vip_спермик": {"price": 300, "desc": "VIP роль + цвет", "role": "VIP Спермик"},
 }
 
@@ -201,12 +201,45 @@ class RoleButton(discord.ui.Button):
             await interaction.user.add_roles(role)
             await interaction.response.send_message(f"✅ Роль {role.mention} выдана", ephemeral=True)
 
+class TransferModal(discord.ui.Modal, title="Перевести спермики"):
+    target = discord.ui.TextInput(label="Кому (ID или @упоминание)", placeholder="123456789 или @user", required=True, max_length=30)
+    amount = discord.ui.TextInput(label="Сколько спермиков", placeholder="100", required=True, max_length=6)
+    async def on_submit(self, interaction: discord.Interaction):
+        # Парсим ID
+        raw = self.target.value.strip()
+        # Пытаемся вытащить ID из упоминания <@...>
+        import re
+        m = re.search(r"\d{15,}", raw)
+        if not m:
+            await interaction.response.send_message("❌ Укажи ID или упомяни пользователя", ephemeral=True)
+            return
+        tid = int(m.group(0))
+        try:
+            amt = int(self.amount.value.strip())
+        except:
+            await interaction.response.send_message("❌ Неверное количество", ephemeral=True)
+            return
+        if amt <= 0 or amt > 10000:
+            await interaction.response.send_message("❌ От 1 до 10000", ephemeral=True)
+            return
+        if tid == interaction.user.id:
+            await interaction.response.send_message("❌ Себе нельзя", ephemeral=True)
+            return
+        if get_balance(interaction.user.id) < amt:
+            await interaction.response.send_message(f"❌ Недостаточно. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
+            return
+        add_spermi(interaction.user.id, -amt)
+        add_spermi(tid, amt)
+        member = interaction.guild.get_member(tid)
+        name = member.mention if member else f"<@{tid}>"
+        await interaction.response.send_message(f"💸 Перевел {amt} 💦 → {name}. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
+
 # ============ ПРОФИЛЬ / МАГАЗИН ПАНЕЛИ (как на скрине Милка) ============
 class ProfileView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Открыть инвентарь", style=discord.ButtonStyle.secondary, custom_id="profile_inv", emoji="📦")
+    @discord.ui.button(label="Открыть инвентарь", style=discord.ButtonStyle.secondary, custom_id="profile_inv", emoji="📦", row=0)
     async def inv(self, interaction: discord.Interaction, button: discord.ui.Button):
         bal = get_balance(interaction.user.id)
         data = load_economy()
@@ -214,7 +247,7 @@ class ProfileView(discord.ui.View):
         desc = f"💦 Спермики: **{bal}**\n📦 Предметы: {', '.join(inv) if inv else 'пусто'}\n\nКейсы и роли — в #магазин"
         await interaction.response.send_message(desc, ephemeral=True)
 
-    @discord.ui.button(label="Выбрать роли", style=discord.ButtonStyle.secondary, custom_id="profile_roles", emoji="🎨")
+    @discord.ui.button(label="Выбрать роли", style=discord.ButtonStyle.secondary, custom_id="profile_roles", emoji="🎨", row=0)
     async def roles(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         if not config.SELF_ROLES:
@@ -223,7 +256,56 @@ class ProfileView(discord.ui.View):
         view = RolesButtonView(guild)
         await interaction.response.send_message("Выбери роли:", view=view, ephemeral=True)
 
-    @discord.ui.button(label="Ввести промокод", style=discord.ButtonStyle.secondary, custom_id="profile_promo", emoji="🎟️")
+    @discord.ui.button(label="Ежедневка +100", style=discord.ButtonStyle.success, custom_id="profile_daily", emoji="💰", row=0)
+    async def daily_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_economy()
+        uid = str(interaction.user.id)
+        now = time.time()
+        last = data.get(uid, {}).get("daily", 0)
+        if now - last < 86400:
+            left = 86400 - (now - last)
+            h = int(left // 3600)
+            m = int((left % 3600) // 60)
+            await interaction.response.send_message(f"⏳ Уже брал! Через {h}ч {m}м", ephemeral=True)
+            return
+        bal = add_spermi(interaction.user.id, 100)
+        data = load_economy()
+        data[uid]["daily"] = now
+        save_economy(data)
+        await interaction.response.send_message(f"✅ Получено 100 💦! Баланс: {bal}", ephemeral=True)
+
+    @discord.ui.button(label="Перевести", style=discord.ButtonStyle.secondary, custom_id="profile_transfer", emoji="💸", row=1)
+    async def transfer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TransferModal())
+
+    @discord.ui.button(label="Начать квест Димы", style=discord.ButtonStyle.primary, custom_id="profile_quest", emoji="💖", row=1)
+    async def quest_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Проверка админа как и раньше для квеста
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Только админ может запустить квест. Попроси админа нажать.", ephemeral=True)
+            return
+        await quest_dima(interaction)
+
+    @discord.ui.button(label="Рулетка дроноеба", style=discord.ButtonStyle.danger, custom_id="profile_roulete", emoji="🚁", row=1)
+    async def roulete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Быстрая рулетка на 50
+        if get_balance(interaction.user.id) < 50:
+            await interaction.response.send_message(f"❌ Нужно 50 💦, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
+            return
+        roll = random.randint(1, 100)
+        if roll <= 45:
+            add_spermi(interaction.user.id, -50)
+            await interaction.response.send_message(f"💥 Раб дроноеб ебанул! -50 💦. Ролл {roll}/100", ephemeral=True)
+        elif roll <= 90:
+            win = 75
+            add_spermi(interaction.user.id, win)
+            await interaction.response.send_message(f"🚁 Промах! +{win} 💦! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
+        else:
+            win = 150
+            add_spermi(interaction.user.id, win)
+            await interaction.response.send_message(f"🔥 ДЖЕКПОТ! +{win} 💦! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
+
+    @discord.ui.button(label="Ввести промокод", style=discord.ButtonStyle.secondary, custom_id="profile_promo", emoji="🎟️", row=2)
     async def promo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Промокоды скоро! Следи за анонсами.", ephemeral=True)
 
@@ -251,8 +333,8 @@ class ShopView(discord.ui.View):
 
     @discord.ui.button(label="Товары за детали дрона", style=discord.ButtonStyle.secondary, custom_id="shop_drone", emoji="🚁")
     async def drone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(title="🚁 Товары за Детали Дрона", description="Выиграл у главы дроноеба? Трать!", color=discord.Color.from_rgb(255, 107, 139))
-        embed.add_field(name="глава_дроноеба — 777 💦", value="Роль Глава Дроноеба 🚁", inline=False)
+        embed = discord.Embed(title="🚁 Товары за Детали Дрона", description="Выиграл у раба дроноеба? Трать!", color=discord.Color.from_rgb(255, 107, 139))
+        embed.add_field(name="раб_дроноеб — 777 💦", value="Роль Раб дроноеб 🚁", inline=False)
         embed.add_field(name="Дрон-скин — 400 🚁", value="Скоро", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
 
@@ -581,26 +663,20 @@ async def setup_menu(interaction: discord.Interaction):
     embed_prof2.description = f"Все твои предметы: кейсы, роли. Покупай в {shop_ch.mention}\nБаланс: /баланс | Ежедневка: /ежедневка"
     await profil_ch.send(embed=embed_prof2)
 
-    # Эмбед магазин (стилистика 2го скрина - розовый Милка + мемы спермики/Дима/дроноеб)
-    # Баннер как на скрине: розовый с большими буквами
-    embed_banner = discord.Embed(color=discord.Color.from_rgb(255, 107, 139))
-    embed_banner.set_image(url="https://i.imgur.com/8Km9tLL.png")  # розовый баннер, заменишь на свой если хочешь (идеально 1200x400)
+    # Баннер как на скрине - теперь твоя аниме-девочка
+    embed_banner = discord.Embed(title="МАГАЗИНЫ — Фармим, закупаемся!", color=discord.Color.from_rgb(255, 107, 139))
+    embed_banner.set_image(url="https://img.magnific.com/premium-photo/cute-anime-girl-hoodie-wallpaper_776894-105948.jpg?semt=ais_hybrid")
     await shop_ch.send(embed=embed_banner)
 
     embed_shop = discord.Embed(title="Валюта Сервера", color=discord.Color.from_rgb(255, 107, 139))
     embed_shop.description = "**Фармим, закупаемся!**\nТут всё за мемы сервера:"
     embed_shop.add_field(name="💦 Спермики", value="Получаются за активность: сообщения, войс, ивенты\n`/ежедневка`, `/баланс`, `/перевести`", inline=False)
     embed_shop.add_field(name="💖 Любовь Димы", value="За квест `Найди любимую Димы` — `/квест-димы` → `/нашел`", inline=False)
-    embed_shop.add_field(name="🚁 Детали Дрона", value="За `Рулетку главы дроноеба` — `/рулетка-дроноеба`\nИспытай удачу и сорви куш!", inline=False)
+    embed_shop.add_field(name="🚁 Детали Дрона", value="За `Рулетку раба дроноеба` — `/рулетка-дроноеба`\nИспытай удачу и сорви куш!", inline=False)
     embed_shop.set_footer(text="Black ICE Palace • спермики • любимая Димы • дроноеб")
-    # Кастомный баннер текст (имитация скрина "МАГАЗИНЫ")
-    embed_shop.set_author(name="МАГАЗИНЫ — Фармим, закупаемся!", icon_url="https://cdn.discordapp.com/emojis/1160000000000000000.png")
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     await shop_ch.send(embed=embed_shop, view=ShopView())
-    # Доп панель с кнопками как на скрине "Товары за ..."
-    embed_shop_btn = discord.Embed(description="Выбери валюту:", color=discord.Color.from_rgb(255, 107, 139))
-    await shop_ch.send(embed=embed_shop_btn, view=ShopView())
 
     # Скрываем категорию Меню от небусифицированных если есть роль
     if role:
@@ -700,8 +776,8 @@ async def daily(interaction: discord.Interaction):
     save_economy(data)
     await interaction.response.send_message(f"✅ Получено 100 спермиков! Баланс: {bal}")
 
-@bot.tree.command(name="перевести", description="Перевести спермики другу")
-async def transfer(interaction: discord.Interaction, пользователь: discord.Member, количество: app_commands.Range[int, 1, 10000]):
+# Перевод спермиков - теперь только через профиль (кнопка), слэш удален
+async def transfer(interaction: discord.Interaction, пользователь: discord.Member, количество: int):
     if пользователь.id == interaction.user.id:
         await interaction.response.send_message("❌ Себе нельзя", ephemeral=True)
         return
@@ -712,7 +788,7 @@ async def transfer(interaction: discord.Interaction, пользователь: d
     add_spermi(пользователь.id, количество)
     await interaction.response.send_message(f"💸 {interaction.user.mention} перевел {количество} спермиков → {пользователь.mention}")
 
-@bot.tree.command(name="магазин", description="Магазин за спермики")
+# Магазин теперь только через канал #магазин (кнопки), слэш удален
 async def shop(interaction: discord.Interaction):
     embed = discord.Embed(title="🛒 Магазин спермиков", color=discord.Color.gold())
     for key, item in SHOP_ITEMS.items():
@@ -720,7 +796,7 @@ async def shop(interaction: discord.Interaction):
     embed.set_footer(text="Купить: /купить <название>")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="купить", description="Купить предмет из магазина")
+# Покупка теперь только через кнопки магазина, слэш удален
 async def buy(interaction: discord.Interaction, предмет: str):
     key = предмет.lower()
     if key not in SHOP_ITEMS:
@@ -764,9 +840,7 @@ async def top_spermi(interaction: discord.Interaction):
     embed = discord.Embed(title="🏆 Топ спермиков", description=desc, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed)
 
-# ============ КВЕСТ ЛЮБИМАЯ ДИМЫ ============
-@bot.tree.command(name="квест-димы", description="Запустить квест Найди любимую Димы (только админ)")
-@app_commands.checks.has_permissions(administrator=True)
+# ============ КВЕСТ ЛЮБИМАЯ ДИМЫ (теперь только через профиль, слэш удален) ============
 async def quest_dima(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -823,9 +897,8 @@ async def found_dima(interaction: discord.Interaction):
             pass
         await interaction.response.send_message(f"🎉 КРАСАВА! Ты нашел все 3 любимые Димы! +500 спермиков и роль {role.mention}!")
 
-# ============ РУЛЕТКА ГЛАВЫ ДРОНОЕБА ============
-@bot.tree.command(name="рулетка-дроноеба", description="Рулетка главы дроноеба — испытай удачу")
-async def roulete_drone(interaction: discord.Interaction, ставка: app_commands.Range[int, 1, 1000]):
+# Рулетка теперь только через профиль (кнопка), слэш удален
+async def roulete_drone(interaction: discord.Interaction, ставка: int):
     if get_balance(interaction.user.id) < ставка:
         await interaction.response.send_message(f"❌ Нужно {ставка} спермиков, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
         return
@@ -833,15 +906,15 @@ async def roulete_drone(interaction: discord.Interaction, ставка: app_comm
     if roll <= 45:
         # проиграл
         add_spermi(interaction.user.id, -ставка)
-        await interaction.response.send_message(f"💥 Глава дроноеба ебанул! Ты проиграл {ставка} спермиков. Ролл {roll}/100")
+        await interaction.response.send_message(f"💥 Раб дроноеб ебанул! Ты проиграл {ставка} спермиков. Ролл {roll}/100")
     elif roll <= 90:
         win = int(ставка * 1.5)
         add_spermi(interaction.user.id, win)
-        await interaction.response.send_message(f"🚁 Глава дроноеба промахнулся! Выиграл +{win} спермиков! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}")
+        await interaction.response.send_message(f"🚁 Раб дроноеб промахнулся! Выиграл +{win} спермиков! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}")
     else:
         win = ставка * 3
         add_spermi(interaction.user.id, win)
-        await interaction.response.send_message(f"🔥 ДЖЕКПОТ! Глава дроноеба взорвался! +{win} спермиков! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}")
+        await interaction.response.send_message(f"🔥 ДЖЕКПОТ! Раб дроноеб взорвался! +{win} спермиков! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}")
 
 # Обработка ошибок прав
 @setup_verify.error
