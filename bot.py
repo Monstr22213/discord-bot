@@ -842,7 +842,10 @@ async def setup_menu(interaction: discord.Interaction):
         except:
             pass
 
-    # Эмбед профиль (как у Милки - розовый)
+    # Эмбед профиль (как у Милки - розовый) + баннер-гифка сверху
+    embed_banner_prof = discord.Embed(color=discord.Color.from_rgb(255, 105, 180))
+    embed_banner_prof.set_image(url="https://yt3.ggpht.com/t2oynaaQq3aVvMuzymoqvK6m8VGPu1mV5Krr4x9YRvw0bHEKv4mwXteK3DmTqLo4j2US8OW0b21y4A=s416-c-fcrop64=1,380b0000c7f4ffff-nd-v1-rwa")
+    await profil_ch.send(embed=embed_banner_prof)
     embed_prof = discord.Embed(title="Профиль • Инвентарь и Роли", description="Управляй ролями, инвентарем и спермиками", color=discord.Color.from_rgb(255, 105, 180))
     embed_prof.add_field(name="📦 Инвентарь", value="Предметы — как пульт ролями. Чтобы получить роль, купи в магазине.", inline=True)
     embed_prof.add_field(name="🎨 Фоны", value="Крути гачу за спермики и открывай фоны профиля", inline=True)
