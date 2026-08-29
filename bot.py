@@ -9,15 +9,24 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============ VIEWS ============
 
+def get_verify_role(guild: discord.Guild):
+    # Приоритет: роль по имени "бусифицированный" -> затем ID из .env
+    role = discord.utils.get(guild.roles, name="бусифицированный")
+    if role:
+        return role
+    if config.VERIFY_ROLE_ID:
+        return guild.get_role(config.VERIFY_ROLE_ID)
+    return None
+
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="🚐 Пройти Бусификацию", style=discord.ButtonStyle.green, custom_id="verify_btn")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        role = interaction.guild.get_role(config.VERIFY_ROLE_ID) if config.VERIFY_ROLE_ID else None
+        role = get_verify_role(interaction.guild)
         if not role:
-            await interaction.response.send_message("❌ Роль для верификации не настроена. Обратись к админу.", ephemeral=True)
+            await interaction.response.send_message("❌ Роль `бусифицированный` не найдена. Напиши `/основа` чтобы создать.", ephemeral=True)
             return
         if role in interaction.user.roles:
             await interaction.response.send_message(f"Ты уже верифицирован! Роль {role.mention} уже есть.", ephemeral=True)
@@ -141,15 +150,14 @@ async def on_ready():
     print(f"Бот {bot.user} запущен! На {len(bot.guilds)} серверах")
     bot.add_view(VerifyView())
     try:
-        # Синхронизация глобально + мгновенно для твоего сервера (чтобы команды появились сразу)
-        synced = await bot.tree.sync()
-        print(f"Синхронизировано глобально {len(synced)} команд")
+        # Чистим дубли (было 2x /основа из-за copy_global_to) - оставляем только глобальные
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
-            # копируем глобальные команды в гильдию для мгновенного появления
-            bot.tree.copy_global_to(guild=guild)
-            synced_guild = await bot.tree.sync(guild=guild)
-            print(f"Синхронизировано для гильдии {config.GUILD_ID}: {len(synced_guild)} команд")
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print(f"Очищены дубли гильдии {config.GUILD_ID}")
+        synced = await bot.tree.sync()
+        print(f"Синхронизировано глобально {len(synced)} команд")
     except Exception as e:
         print(f"Ошибка синхронизации: {e}")
 
@@ -201,14 +209,43 @@ async def setup_verify(interaction: discord.Interaction, канал: discord.Tex
 async def setup_base(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-    # Ищем или создаем канал
-    channel = discord.utils.get(guild.text_channels, name="бусификация")
+
+    # 1. Роль бусифицированный - создаем если нет
+    role = discord.utils.get(guild.roles, name="бусифицированный")
+    if not role:
+        try:
+            role = await guild.create_role(name="бусифицированный", colour=discord.Colour.gold(), reason="Роль для Бусификации /основа")
+            # Ставим роль бота выше чтобы мог выдавать, но ниже админов - Discord сам поставит внизу, админ потом подвинет если надо
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Нет прав создавать роль `бусифицированный`. Дай боту `Manage Roles` и роль выше.", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка создания роли: {e}", ephemeral=True)
+            return
+
+    # 2. Канал бусификация - ищем по разным вариантам имени
+    channel = discord.utils.get(guild.text_channels, name="🚐・бусификация") or discord.utils.get(guild.text_channels, name="бусификация")
+    # Проверка уже установлено?
+    if channel:
+        # Проверяем есть ли уже панель бусификации в канале
+        has_panel = False
+        try:
+            async for msg in channel.history(limit=5):
+                if msg.author == guild.me and msg.embeds and msg.embeds[0].title and "БУСИФИКАЦИЯ" in msg.embeds[0].title:
+                    has_panel = True
+                    break
+        except:
+            pass
+        if has_panel:
+            await interaction.followup.send(f"⚠️ Уже настроено! Канал {channel.mention} + роль {role.mention} уже существуют.", ephemeral=True)
+            return
+
     if not channel:
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            role: discord.PermissionOverwrite(view_channel=False)  # бусифицированным не нужно видеть канал верификации после
         }
-        # Разрешаем верифицированным писать везде, но в бусификации только смотреть - настраивается отдельно правами категорий
         try:
             channel = await guild.create_text_channel("🚐・бусификация", overwrites=overwrites, topic="Пройди бусификацию чтобы получить доступ", reason="Команда /основа")
         except discord.Forbidden:
@@ -218,9 +255,26 @@ async def setup_base(interaction: discord.Interaction):
             await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
             return
 
+    # 3. Скрываем все каналы от непроверенных (@everyone), открываем для бусифицированных
+    hidden_count = 0
+    for ch in guild.channels:
+        if ch.id == channel.id:
+            continue
+        # Не трогаем категории где уже есть оверрайты, но ставим для @everyone deny
+        try:
+            # Ставим @everyone view False
+            await ch.set_permissions(guild.default_role, view_channel=False)
+            # Открываем для роли бусифицированный
+            await ch.set_permissions(role, view_channel=True)
+            hidden_count += 1
+        except discord.Forbidden:
+            continue
+        except Exception:
+            continue
+
     embed = discord.Embed(
         title="🚐 БУСИФИКАЦИЯ",
-        description="**Вас остановили ТЦК!**\n\nЧтобы избежать поездки в бусике — пройди бусификацию 👇\n\nНажми **Пройти Бусификацию** и получи доступ к серверу.\n\n> 🫡 *Локальный мем сервера — бусификация обязательна*",
+        description="**Вас остановили ТЦК!**\n\nЧтобы избежать поездки в бусике — пройди бусификацию 👇\n\nНажми **Пройти Бусификацию** и получи доступ к серверу.\n\n> 🫡 *Локальный мем сервера — бусификация обязательна*\n> Без роли `бусифицированный` ты не увидишь другие каналы!",
         color=discord.Color.gold()
     )
     embed.set_footer(text=f"{guild.name} • Не сопротивляйся бусификации")
@@ -233,7 +287,7 @@ async def setup_base(interaction: discord.Interaction):
         pass
 
     await channel.send(embed=embed, view=VerifyView())
-    await interaction.followup.send(f"✅ Канал {channel.mention} создан и панель **Бусификации** установлена!", ephemeral=True)
+    await interaction.followup.send(f"✅ Готово! Канал {channel.mention} + роль {role.mention}\n🔒 Скрыто {hidden_count} каналов от непроверенных. Без `бусифицированный` видно только этот канал.", ephemeral=True)
 
 @bot.tree.command(name="роли", description="Создать панель с выдачей ролей (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
