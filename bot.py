@@ -140,10 +140,16 @@ class RoleButton(discord.ui.Button):
 async def on_ready():
     print(f"Бот {bot.user} запущен! На {len(bot.guilds)} серверах")
     bot.add_view(VerifyView())
-    # Для RolesView нужно guild, поэтому добавляем после готовности если нужно persistent
     try:
+        # Синхронизация глобально + мгновенно для твоего сервера (чтобы команды появились сразу)
         synced = await bot.tree.sync()
-        print(f"Синхронизировано {len(synced)} команд")
+        print(f"Синхронизировано глобально {len(synced)} команд")
+        if config.GUILD_ID:
+            guild = discord.Object(id=config.GUILD_ID)
+            # копируем глобальные команды в гильдию для мгновенного появления
+            bot.tree.copy_global_to(guild=guild)
+            synced_guild = await bot.tree.sync(guild=guild)
+            print(f"Синхронизировано для гильдии {config.GUILD_ID}: {len(synced_guild)} команд")
     except Exception as e:
         print(f"Ошибка синхронизации: {e}")
 
