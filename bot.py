@@ -231,11 +231,29 @@ class ShopView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Товары за спермики", style=discord.ButtonStyle.primary, custom_id="shop_spermi", emoji="💦")
+    @discord.ui.button(label="Товары за спермики", style=discord.ButtonStyle.secondary, custom_id="shop_spermi", emoji="💦")
     async def spermi(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(title="🛒 Товары за спермики", color=discord.Color.gold())
+        embed = discord.Embed(title="🛒 Товары за спермики", description="Трать спермики, фарми дальше", color=discord.Color.from_rgb(255, 107, 139))
         for k, v in SHOP_ITEMS.items():
-            embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
+            if "сперм" in k.lower() or k in ["vip_спермик", "бронь_от_дрона"]:
+                embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
+        if len(embed.fields) == 0:
+            for k, v in SHOP_ITEMS.items():
+                embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
+
+    @discord.ui.button(label="Товары за любовь Димы", style=discord.ButtonStyle.secondary, custom_id="shop_dima", emoji="💖")
+    async def dima(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(title="💖 Товары за Любовь Димы", description="Нафармил любимых? Трать!", color=discord.Color.from_rgb(255, 107, 139))
+        embed.add_field(name="любимая_димы — 1000 💦", value="Роль Любимая Димы 💖 (легендарка)", inline=False)
+        embed.add_field(name="Фон 'Дима и ко' — 500 💖", value="Скоро", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
+
+    @discord.ui.button(label="Товары за детали дрона", style=discord.ButtonStyle.secondary, custom_id="shop_drone", emoji="🚁")
+    async def drone(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(title="🚁 Товары за Детали Дрона", description="Выиграл у главы дроноеба? Трать!", color=discord.Color.from_rgb(255, 107, 139))
+        embed.add_field(name="глава_дроноеба — 777 💦", value="Роль Глава Дроноеба 🚁", inline=False)
+        embed.add_field(name="Дрон-скин — 400 🚁", value="Скоро", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
 
 class ShopBuyView(discord.ui.View):
@@ -563,14 +581,26 @@ async def setup_menu(interaction: discord.Interaction):
     embed_prof2.description = f"Все твои предметы: кейсы, роли. Покупай в {shop_ch.mention}\nБаланс: /баланс | Ежедневка: /ежедневка"
     await profil_ch.send(embed=embed_prof2)
 
-    # Эмбед магазин (розовый баннер)
-    embed_shop = discord.Embed(title="МАГАЗИНЫ", description="**Фармим, закупаемся!**", color=discord.Color.from_rgb(255, 105, 180))
-    embed_shop.add_field(name="Валюта — Спермики 💦", value="• Монетки — за сообщения, войс, ивенты\n• Кристаллы — скоро\n• Спермики — за активность, квесты, рулетку", inline=False)
-    embed_shop.set_image(url="https://i.imgur.com/8Km9tLL.png")
-    embed_shop.set_footer(text="Магазин спермиков")
+    # Эмбед магазин (стилистика 2го скрина - розовый Милка + мемы спермики/Дима/дроноеб)
+    # Баннер как на скрине: розовый с большими буквами
+    embed_banner = discord.Embed(color=discord.Color.from_rgb(255, 107, 139))
+    embed_banner.set_image(url="https://i.imgur.com/8Km9tLL.png")  # розовый баннер, заменишь на свой если хочешь (идеально 1200x400)
+    await shop_ch.send(embed=embed_banner)
+
+    embed_shop = discord.Embed(title="Валюта Сервера", color=discord.Color.from_rgb(255, 107, 139))
+    embed_shop.description = "**Фармим, закупаемся!**\nТут всё за мемы сервера:"
+    embed_shop.add_field(name="💦 Спермики", value="Получаются за активность: сообщения, войс, ивенты\n`/ежедневка`, `/баланс`, `/перевести`", inline=False)
+    embed_shop.add_field(name="💖 Любовь Димы", value="За квест `Найди любимую Димы` — `/квест-димы` → `/нашел`", inline=False)
+    embed_shop.add_field(name="🚁 Детали Дрона", value="За `Рулетку главы дроноеба` — `/рулетка-дроноеба`\nИспытай удачу и сорви куш!", inline=False)
+    embed_shop.set_footer(text="Black ICE Palace • спермики • любимая Димы • дроноеб")
+    # Кастомный баннер текст (имитация скрина "МАГАЗИНЫ")
+    embed_shop.set_author(name="МАГАЗИНЫ — Фармим, закупаемся!", icon_url="https://cdn.discordapp.com/emojis/1160000000000000000.png")
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     await shop_ch.send(embed=embed_shop, view=ShopView())
+    # Доп панель с кнопками как на скрине "Товары за ..."
+    embed_shop_btn = discord.Embed(description="Выбери валюту:", color=discord.Color.from_rgb(255, 107, 139))
+    await shop_ch.send(embed=embed_shop_btn, view=ShopView())
 
     # Скрываем категорию Меню от небусифицированных если есть роль
     if role:
