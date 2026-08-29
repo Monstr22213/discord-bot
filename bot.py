@@ -11,11 +11,68 @@ import time
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ============ ЭКОНОМИКА СПЕРМИКИ ============
-ECONOMY_FILE = "economy.json"
-QUEST_FILE = "quest_dima.json"
+# ============ ЭКОНОМИКА СПЕРМИКИ (сохранение) ============
+# Используем Postgres если есть DATABASE_URL (Railway), иначе файл
+import urllib.parse as urlparse
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_db():
+    if not DATABASE_URL:
+        return None
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        conn.autocommit = True
+        return conn
+    except Exception as e:
+        print(f"DB connect fail: {e}")
+        return None
+
+def init_db():
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS economy (user_id TEXT PRIMARY KEY, balance INT DEFAULT 0, daily BIGINT DEFAULT 0, items TEXT DEFAULT '[]')")
+        cur.execute("CREATE TABLE IF NOT EXISTS quest (guild_id TEXT PRIMARY KEY, data TEXT)")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB init fail: {e}")
+
+# Фолбэк файлы
+DATA_DIR = "/data" if os.path.exists("/data") else "."
+ECONOMY_FILE = os.path.join(DATA_DIR, "economy.json")
+QUEST_FILE = os.path.join(DATA_DIR, "quest_dima.json")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except:
+    pass
 
 def load_economy():
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT user_id, balance, daily, items FROM economy")
+            rows = cur.fetchall()
+            data = {}
+            for uid, bal, daily, items in rows:
+                try:
+                    it = json.loads(items) if items else []
+                except:
+                    it = []
+                data[uid] = {"balance": bal, "daily": daily, "items": it}
+            cur.close()
+            conn.close()
+            return data
+        except:
+            try:
+                conn.close()
+            except:
+                pass
     if not os.path.exists(ECONOMY_FILE):
         return {}
     try:
@@ -25,6 +82,24 @@ def load_economy():
         return {}
 
 def save_economy(data):
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            for uid, info in data.items():
+                bal = info.get("balance", 0)
+                daily = int(info.get("daily", 0))
+                items = json.dumps(info.get("items", []), ensure_ascii=False)
+                cur.execute("INSERT INTO economy (user_id, balance, daily, items) VALUES (%s,%s,%s,%s) ON CONFLICT (user_id) DO UPDATE SET balance=EXCLUDED.balance, daily=EXCLUDED.daily, items=EXCLUDED.items", (uid, bal, daily, items))
+            cur.close()
+            conn.close()
+            return
+        except Exception as e:
+            print(f"save_economy DB fail: {e}")
+            try:
+                conn.close()
+            except:
+                pass
     try:
         with open(ECONOMY_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -36,10 +111,27 @@ def get_balance(user_id: int):
     return data.get(str(user_id), {}).get("balance", 0)
 
 def add_spermi(user_id: int, amount: int):
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            uid = str(user_id)
+            cur.execute("INSERT INTO economy (user_id, balance) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING", (uid, 0))
+            cur.execute("UPDATE economy SET balance = GREATEST(0, balance + %s) WHERE user_id=%s RETURNING balance", (amount, uid))
+            bal = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return bal
+        except Exception as e:
+            print(f"add_spermi DB fail: {e}")
+            try:
+                conn.close()
+            except:
+                pass
     data = load_economy()
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"balance": 0, "daily": 0}
+        data[uid] = {"balance": 0, "daily": 0, "items": []}
     data[uid]["balance"] = data[uid].get("balance", 0) + amount
     if data[uid]["balance"] < 0:
         data[uid]["balance"] = 0
@@ -47,13 +139,29 @@ def add_spermi(user_id: int, amount: int):
     return data[uid]["balance"]
 
 def nuke_balance(user_id: int):
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("UPDATE economy SET balance=0 WHERE user_id=%s", (str(user_id),))
+            cur.close()
+            conn.close()
+            return 0
+        except:
+            pass
     data = load_economy()
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"balance": 0, "daily": 0}
+        data[uid] = {"balance": 0, "daily": 0, "items": []}
     data[uid]["balance"] = 0
     save_economy(data)
     return 0
+
+# Вызвать при старте
+try:
+    init_db()
+except:
+    pass
 
 # Магазин
 SHOP_ITEMS = {
@@ -63,8 +171,28 @@ SHOP_ITEMS = {
     "vip_спермик": {"price": 300, "desc": "VIP роль + цвет", "role": "VIP Спермик"},
 }
 
-# Квест Димы - храним спрятанные сообщения
+# Квест Димы - храним в БД если есть, иначе файл
 def load_quest():
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT guild_id, data FROM quest")
+            rows = cur.fetchall()
+            data = {}
+            for gid, j in rows:
+                try:
+                    data[gid] = json.loads(j)
+                except:
+                    data[gid] = {}
+            cur.close()
+            conn.close()
+            return data
+        except:
+            try:
+                conn.close()
+            except:
+                pass
     if not os.path.exists(QUEST_FILE):
         return {}
     try:
@@ -74,6 +202,23 @@ def load_quest():
         return {}
 
 def save_quest(data):
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            for gid, info in data.items():
+                j = json.dumps(info, ensure_ascii=False)
+                cur.execute("INSERT INTO quest (guild_id, data) VALUES (%s,%s) ON CONFLICT (guild_id) DO UPDATE SET data=EXCLUDED.data", (gid, j))
+            # Удаляем удаленные гильдии - очищаем лишние? не нужно
+            cur.close()
+            conn.close()
+            return
+        except Exception as e:
+            print(f"save_quest DB fail: {e}")
+            try:
+                conn.close()
+            except:
+                pass
     with open(QUEST_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -975,16 +1120,26 @@ async def found_dima(interaction: discord.Interaction):
         old_channels = list(q["channels"])
         q["stage"] = stage + 1
         q["found"][uid] = []  # сброс для след. этапа
-        # Создаем новые каналы для следующего этапа
+        # Создаем новые каналы для следующего этапа - приватные для игрока (как просил)
         funny_names = ["любимая-димы-этап2", f"дима-прячет-снова-{stage+1}", "схрон-2-уровня", "подвал-2", "чердак-2"]
         q_category = discord.utils.get(guild.categories, name="💖 Квест Димы")
+        if not q_category:
+            try:
+                q_category = await guild.create_category("💖 Квест Димы", reason="Квест Димы")
+            except:
+                q_category = None
         new_channels = []
         for _ in range(3):
             fname = random.choice(funny_names) + f"-{random.randint(10,99)}"
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            }
             try:
-                ch = await guild.create_text_channel(fname, category=q_category, topic=f"Этап {stage+1} - любимая Димы", reason="Квест этап 2/3")
+                ch = await guild.create_text_channel(fname, category=q_category, overwrites=overwrites, topic=f"Личный этап {stage+1} для {interaction.user.display_name}", reason=f"Квест этап {stage+1} приватный")
                 new_channels.append(ch)
-                await ch.send(f"||💖 Этап {stage+1}: любимая Димы снова спряталась! /нашел||")
+                await ch.send(f"{interaction.user.mention} ||💖 Этап {stage+1}: любимая Димы снова спряталась тут! /нашел||")
             except:
                 pass
         if new_channels:
