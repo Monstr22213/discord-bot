@@ -13,7 +13,7 @@ class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="✅ Верифицироваться", style=discord.ButtonStyle.green, custom_id="verify_btn")
+    @discord.ui.button(label="🚐 Пройти Бусификацию", style=discord.ButtonStyle.green, custom_id="verify_btn")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = interaction.guild.get_role(config.VERIFY_ROLE_ID) if config.VERIFY_ROLE_ID else None
         if not role:
@@ -181,13 +181,53 @@ async def on_member_remove(member: discord.Member):
 async def setup_verify(interaction: discord.Interaction, канал: discord.TextChannel = None):
     ch = канал or interaction.channel
     embed = discord.Embed(
-        title="🔐 Верификация",
-        description="Нажми на кнопку ниже, чтобы получить доступ к серверу!\n\n> После нажатия тебе выдастся основная роль и откроются каналы.",
-        color=discord.Color.blurple()
+        title="🚐 БУСИФИКАЦИЯ",
+        description="**Добро пожаловать в бусик!**\n\nНажми на кнопку ниже, чтобы пройти бусификацию и получить доступ к серверу!\n\n> ⚠️ Уклонение от бусификации карается ТЦК\n> ✅ После нажатия откроются все каналы.",
+        color=discord.Color.dark_gold()
     )
-    embed.set_footer(text=interaction.guild.name)
+    embed.set_image(url="https://i.imgflip.com/6e0a5u.jpg")
+    embed.set_footer(text=f"{interaction.guild.name} • Бусификация на связи")
     await ch.send(embed=embed, view=VerifyView())
-    await interaction.response.send_message(f"✅ Панель верификации создана в {ch.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Панель Бусификации создана в {ch.mention}", ephemeral=True)
+
+@bot.tree.command(name="основа", description="Создать канал бусификация с верификацией (только админ)")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup_base(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    # Ищем или создаем канал
+    channel = discord.utils.get(guild.text_channels, name="бусификация")
+    if not channel:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+        # Разрешаем верифицированным писать везде, но в бусификации только смотреть - настраивается отдельно правами категорий
+        try:
+            channel = await guild.create_text_channel("🚐・бусификация", overwrites=overwrites, topic="Пройди бусификацию чтобы получить доступ", reason="Команда /основа")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Нет прав создавать каналы.", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
+            return
+
+    embed = discord.Embed(
+        title="🚐 БУСИФИКАЦИЯ",
+        description="**Вас остановили ТЦК!**\n\nЧтобы избежать поездки в бусике — пройди бусификацию 👇\n\nНажми **Пройти Бусификацию** и получи доступ к серверу.\n\n> 🫡 *Локальный мем сервера — бусификация обязательна*",
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text=f"{guild.name} • Не сопротивляйся бусификации")
+    # Чистим старые сообщения бота в канале чтобы не спамить
+    try:
+        async for msg in channel.history(limit=10):
+            if msg.author == guild.me and msg.embeds:
+                await msg.delete()
+    except:
+        pass
+
+    await channel.send(embed=embed, view=VerifyView())
+    await interaction.followup.send(f"✅ Канал {channel.mention} создан и панель **Бусификации** установлена!", ephemeral=True)
 
 @bot.tree.command(name="роли", description="Создать панель с выдачей ролей (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -271,6 +311,7 @@ async def serverinfo(interaction: discord.Interaction):
 
 # Обработка ошибок прав
 @setup_verify.error
+@setup_base.error
 @setup_roles.error
 @clear.error
 @kick.error
