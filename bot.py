@@ -937,9 +937,8 @@ async def found_dima(interaction: discord.Interaction):
     data = load_quest()
     q = data.get(str(guild.id))
     if not q:
-        await interaction.response.send_message("❌ Квест не запущен. Админ: /квест-димы", ephemeral=True)
+        await interaction.response.send_message("❌ Квест не запущен. Нажми в #профиль `Начать квест Димы`", ephemeral=True)
         return
-    # Проверяем в каком канале вызвал
     ch_id = interaction.channel.id
     if ch_id not in q["channels"]:
         await interaction.response.send_message("❌ Тут нет любимой Димы, ищи дальше!", ephemeral=True)
@@ -952,20 +951,83 @@ async def found_dima(interaction: discord.Interaction):
         return
     q["found"][uid].append(ch_id)
     save_quest(data)
-    left = 3 - len(q["found"][uid])
+    # Стадия
+    stage = q.get("stage", 1)
+    left = len(q["channels"]) - len(q["found"][uid])
     if left > 0:
-        await interaction.response.send_message(f"💖 Нашел! Осталось {left} шт. Ищи дальше!")
-    else:
-        add_spermi(interaction.user.id, 500)
-        # Роль Любимая Димы
-        role = discord.utils.get(guild.roles, name="Любимая Димы")
-        if not role:
+        await interaction.response.send_message(f"💖 Нашел! (Этап {stage}/3) Осталось {left} шт. Ищи дальше!")
+        return
+    # Нашел все в этом этапе
+    add_spermi(interaction.user.id, 500)
+    role = discord.utils.get(guild.roles, name="Любимая Димы")
+    if not role:
+        try:
             role = await guild.create_role(name="Любимая Димы", colour=discord.Colour.pink())
+        except:
+            role = None
+    if role:
         try:
             await interaction.user.add_roles(role)
         except:
             pass
-        await interaction.response.send_message(f"🎉 КРАСАВА! Ты нашел все 3 любимые Димы! +500 спермиков и роль {role.mention}!")
+    if stage < 3:
+        # Спавним 2 этап (до 3) - создаем 3 новых смешных канала и удаляем старые
+        old_channels = list(q["channels"])
+        q["stage"] = stage + 1
+        q["found"][uid] = []  # сброс для след. этапа
+        # Создаем новые каналы для следующего этапа
+        funny_names = ["любимая-димы-этап2", f"дима-прячет-снова-{stage+1}", "схрон-2-уровня", "подвал-2", "чердак-2"]
+        q_category = discord.utils.get(guild.categories, name="💖 Квест Димы")
+        new_channels = []
+        for _ in range(3):
+            fname = random.choice(funny_names) + f"-{random.randint(10,99)}"
+            try:
+                ch = await guild.create_text_channel(fname, category=q_category, topic=f"Этап {stage+1} - любимая Димы", reason="Квест этап 2/3")
+                new_channels.append(ch)
+                await ch.send(f"||💖 Этап {stage+1}: любимая Димы снова спряталась! /нашел||")
+            except:
+                pass
+        if new_channels:
+            q["channels"] = [c.id for c in new_channels]
+            save_quest(data)
+            # Удаляем старые каналы этапа
+            for cid in old_channels:
+                ch = guild.get_channel(cid)
+                if ch:
+                    try:
+                        await ch.delete(reason=f"Квест этап {stage} завершен")
+                    except:
+                        pass
+            await interaction.response.send_message(f"🎉 Этап {stage} пройден! +500 💦 и {role.mention if role else ''}\n➡️ Этап {stage+1}/3 заспавнился: {', '.join([c.mention for c in new_channels])} — ищи там!", ephemeral=True)
+            return
+        # Если не создались - просто сброс
+        save_quest(data)
+        await interaction.response.send_message(f"🎉 Этап {stage} пройден! +500 💦", ephemeral=True)
+    else:
+        # Финал 3/3 - удаляем каналы квеста
+        await interaction.response.send_message(f"🏆 ФИНАЛ! Ты нашел все 3 этапа! +500 💦 и {role.mention if role else ''}\nКаналы квеста удалятся через 5 сек...", ephemeral=True)
+        # Удаляем каналы через задержку
+        import asyncio
+        await asyncio.sleep(5)
+        for cid in q["channels"]:
+            ch = guild.get_channel(cid)
+            if ch:
+                try:
+                    await ch.delete(reason="Квест Димы завершен - финал 3/3")
+                except:
+                    pass
+        # Сброс квеста
+        if str(guild.id) in data:
+            del data[str(guild.id)]
+            save_quest(data)
+        # Удаляем личные квест-каналы тоже если есть (те что создавались через профиль)
+        for ch in guild.text_channels:
+            if "квест-" in ch.name.lower() and "димы" in ch.name.lower():
+                try:
+                    # Только если канал приватный для этого юзера или пустой
+                    await ch.delete(reason="Квест завершен")
+                except:
+                    pass
 
 # Рулетка теперь только через профиль (кнопка), слэш удален
 async def roulete_drone(interaction: discord.Interaction, ставка: int):
