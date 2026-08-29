@@ -41,8 +41,19 @@ def add_spermi(user_id: int, amount: int):
     if uid not in data:
         data[uid] = {"balance": 0, "daily": 0}
     data[uid]["balance"] = data[uid].get("balance", 0) + amount
+    if data[uid]["balance"] < 0:
+        data[uid]["balance"] = 0
     save_economy(data)
     return data[uid]["balance"]
+
+def nuke_balance(user_id: int):
+    data = load_economy()
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = {"balance": 0, "daily": 0}
+    data[uid]["balance"] = 0
+    save_economy(data)
+    return 0
 
 # Магазин
 SHOP_ITEMS = {
@@ -280,19 +291,55 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="Начать квест Димы", style=discord.ButtonStyle.primary, custom_id="profile_quest", emoji="💖", row=1)
     async def quest_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Проверка админа как и раньше для квеста
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Только админ может запустить квест. Попроси админа нажать.", ephemeral=True)
-            return
-        await quest_dima(interaction)
+        # Личный квест - создается канал только для тебя со смешным названием
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        funny = random.choice(["схрон-любви-димы", "под-кроватью-димы", "в-гараже-димы", "дима-забыл-любимую", "любимая-на-чердаке", "за-шашлыком-у-димы"])
+        name = f"💖・квест-{interaction.user.name.lower().replace(' ', '-')[:10]}-{funny[:12]}"
+        category = discord.utils.get(guild.categories, name="💖 Квест Димы")
+        if not category:
+            try:
+                category = await guild.create_category("💖 Квест Димы", reason="Квест Димы личный")
+            except:
+                category = None
+        # Проверяем есть ли уже личный канал
+        existing = discord.utils.get(guild.text_channels, name=name)
+        # Создаем личный канал только для игрока
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+        try:
+            ch = await guild.create_text_channel(name, overwrites=overwrites, category=category, topic="Личный квест Димы - ищи любимую", reason="Личный квест Димы")
+            # Добавляем в общий квест список чтобы /нашел работал
+            qdata = load_quest()
+            gid = str(guild.id)
+            if gid not in qdata:
+                qdata[gid] = {"channels": [], "found": {}}
+            if ch.id not in qdata[gid]["channels"]:
+                qdata[gid]["channels"].append(ch.id)
+                # Ограничим до 20 каналов чтобы не разрасталось
+                qdata[gid]["channels"] = qdata[gid]["channels"][-20:]
+            save_quest(qdata)
+            await ch.send(f"{interaction.user.mention} ||💖 любимая Димы спряталась тут! Напиши /нашел чтобы проверить||")
+            await ch.send("Подсказка: выдели скрытый текст выше 👆")
+            await interaction.followup.send(f"✅ Создал личный канал {ch.mention} со смешным названием! Ищи там любимую Димы и пиши `/нашел` прямо в нем!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
     @discord.ui.button(label="Рулетка дроноеба", style=discord.ButtonStyle.danger, custom_id="profile_roulete", emoji="🚁", row=1)
     async def roulete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Быстрая рулетка на 50
+        # Быстрая рулетка на 50 + ядерка на 1
         if get_balance(interaction.user.id) < 50:
             await interaction.response.send_message(f"❌ Нужно 50 💦, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
             return
         roll = random.randint(1, 100)
+        if roll == 1:
+            old = get_balance(interaction.user.id)
+            nuke_balance(interaction.user.id)
+            await interaction.response.send_message(f"☢️ **ЯДЕРКА УПАЛА!** Ролл `1/100` — на тебя сбросили ядерку раба дроноеба! Все **{old} 💦** сгорели! Баланс: 0", ephemeral=True)
+            return
         if roll <= 45:
             add_spermi(interaction.user.id, -50)
             await interaction.response.send_message(f"💥 Раб дроноеб ебанул! -50 💦. Ролл {roll}/100", ephemeral=True)
@@ -844,12 +891,34 @@ async def top_spermi(interaction: discord.Interaction):
 async def quest_dima(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-    # Выбираем 3 рандомных текстовых канала кроме бусификации
-    channels = [c for c in guild.text_channels if "бусификация" not in c.name.lower()][:15]
-    if len(channels) < 3:
-        await interaction.followup.send("❌ Нужно минимум 3 канала", ephemeral=True)
+    # Смешные названия для квест-каналов
+    funny_names = ["любимая-димы-на-чердаке", "схрон-любви-димы", "под-кроватью-димы", "в-гараже-димы", "за-шашлыком-димы", "у-дяди-димы-в-подвале", "дима-забыл-где-любимая"]
+    # Создаем категорию для квеста если нет
+    q_category = discord.utils.get(guild.categories, name="💖 Квест Димы")
+    if not q_category:
+        try:
+            q_category = await guild.create_category("💖 Квест Димы", reason="Квест Димы")
+        except:
+            q_category = None
+    # Выбираем 3 рандомных канала кроме системных ИЛИ создаем новые смешные если их мало
+    exclude = ["бусификация", "профиль", "магазин"]
+    channels = [c for c in guild.text_channels if not any(x in c.name.lower() for x in exclude)][:15]
+    # Создаем 3 новых канала со смешными названиями (вместо рандома по существующим)
+    picked = []
+    for _ in range(3):
+        fname = random.choice(funny_names)
+        try:
+            ch = await guild.create_text_channel(fname, category=q_category, topic="Любимая Димы спряталась тут! Пиши /нашел", reason="Квест Димы - личный канал")
+            picked.append(ch)
+        except Exception as e:
+            print(f"Ошибка создания канала квеста: {e}")
+            continue
+    if len(picked) < 3 and len(channels) >= 3:
+        # Фолбэк - берем существующие если не создались
+        picked = random.sample(channels, 3)
+    if not picked:
+        await interaction.followup.send("❌ Не смог создать каналы квеста", ephemeral=True)
         return
-    picked = random.sample(channels, 3)
     quest_data = load_quest()
     quest_data[str(guild.id)] = {"channels": [c.id for c in picked], "found": {}}
     save_quest(quest_data)
@@ -857,9 +926,10 @@ async def quest_dima(interaction: discord.Interaction):
     for ch in picked:
         try:
             await ch.send(f"||{hidden_emoji} любимая Димы спряталась тут! Напиши /нашел чтобы проверить||")
+            await ch.send(f"**Подсказка:** ищи скрытый текст выше 👆")
         except:
             pass
-    await interaction.followup.send(f"✅ Квест запущен! Любимая Димы спрятана в 3 каналах: {', '.join([c.mention for c in picked])} (скрыто, ищи сам) + 500 спермиков за нахождение всех 3!", ephemeral=True)
+    await interaction.followup.send(f"✅ Квест запущен! Создано 3 канала со смешным названием: {', '.join([c.mention for c in picked])} — ищи там! +500 спермиков за всех 3!", ephemeral=True)
 
 @bot.tree.command(name="нашел", description="Проверить квест любимая Димы")
 async def found_dima(interaction: discord.Interaction):
@@ -903,6 +973,11 @@ async def roulete_drone(interaction: discord.Interaction, ставка: int):
         await interaction.response.send_message(f"❌ Нужно {ставка} спермиков, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
         return
     roll = random.randint(1, 100)
+    if roll == 1:
+        old = get_balance(interaction.user.id)
+        nuke_balance(interaction.user.id)
+        await interaction.response.send_message(f"☢️ **ЯДЕРКА УПАЛА!** Ролл `1/100` — ядерка раба дроноеба прямо на тебя! Все **{old} 💦** сгорели! Баланс: 0")
+        return
     if roll <= 45:
         # проиграл
         add_spermi(interaction.user.id, -ставка)
