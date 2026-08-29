@@ -209,12 +209,12 @@ async def on_ready():
     print(f"Бот {bot.user} запущен! На {len(bot.guilds)} серверах")
     bot.add_view(VerifyView())
     try:
-        # Чистим дубли (было 2x /основа из-за copy_global_to) - оставляем только глобальные
+        # Делаем как с /основа - мгновенная синхронизация для твоей гильдии + глобально
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
-            bot.tree.clear_commands(guild=guild)
-            await bot.tree.sync(guild=guild)
-            print(f"Очищены дубли гильдии {config.GUILD_ID}")
+            bot.tree.copy_global_to(guild=guild)
+            synced_guild = await bot.tree.sync(guild=guild)
+            print(f"Синхронизировано для гильдии {config.GUILD_ID}: {len(synced_guild)} команд")
         synced = await bot.tree.sync()
         print(f"Синхронизировано глобально {len(synced)} команд")
     except Exception as e:
