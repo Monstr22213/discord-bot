@@ -223,7 +223,30 @@ async def setup_base(interaction: discord.Interaction):
             await interaction.followup.send(f"❌ Ошибка создания роли: {e}", ephemeral=True)
             return
 
-    # 2. Канал бусификация - ищем по разным вариантам имени
+    # 2. Категория + Канал бусификация
+    category = discord.utils.get(guild.categories, name="🚐・БУСИФИКАЦИЯ") or discord.utils.get(guild.categories, name="БУСИФИКАЦИЯ")
+    if not category:
+        cat_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, manage_channels=True),
+            role: discord.PermissionOverwrite(view_channel=False)
+        }
+        try:
+            category = await guild.create_category("🚐・БУСИФИКАЦИЯ", overwrites=cat_overwrites, reason="Категория для Бусификации /основа")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Нет прав создавать категории.", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка создания категории: {e}", ephemeral=True)
+            return
+    else:
+        # Обновляем права категории
+        try:
+            await category.set_permissions(guild.default_role, view_channel=True)
+            await category.set_permissions(role, view_channel=False)
+        except:
+            pass
+
     channel = discord.utils.get(guild.text_channels, name="🚐・бусификация") or discord.utils.get(guild.text_channels, name="бусификация")
     already_had_channel = channel is not None
     # Проверка панели для дубля - но все равно перенастроим права на всех каналах
@@ -236,15 +259,21 @@ async def setup_base(interaction: discord.Interaction):
                     break
         except:
             pass
+        # Если канал есть но без категории - переносим в категорию
+        if channel.category != category:
+            try:
+                await channel.edit(category=category)
+            except:
+                pass
 
     if not channel:
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            role: discord.PermissionOverwrite(view_channel=False)  # бусифицированным не нужно видеть канал верификации после
+            role: discord.PermissionOverwrite(view_channel=False)
         }
         try:
-            channel = await guild.create_text_channel("🚐・бусификация", overwrites=overwrites, topic="Пройди бусификацию чтобы получить доступ", reason="Команда /основа")
+            channel = await guild.create_text_channel("🚐・бусификация", category=category, overwrites=overwrites, topic="Пройди бусификацию чтобы получить доступ", reason="Команда /основа")
         except discord.Forbidden:
             await interaction.followup.send("❌ Нет прав создавать каналы.", ephemeral=True)
             return
@@ -253,15 +282,13 @@ async def setup_base(interaction: discord.Interaction):
             return
 
     # 3. Скрываем ВСЕ каналы от небусифицированных (@everyone deny, бусифицированный allow)
-    # Делаем это КАЖДЫЙ раз при вызове /основа, даже если уже было настроено - чтобы перенастроить
     hidden_count = 0
     for ch in guild.channels:
-        if ch.id == channel.id:
-            # Для канала бусификации - @everyone видит, бусифицированные скрываем (не нужен)
+        if ch.id == channel.id or ch.id == category.id:
+            # Для категории и канала бусификации - @everyone видит, бусифицированные скрываем
             try:
-                await ch.set_permissions(guild.default_role, view_channel=True, send_messages=False, read_message_history=True)
+                await ch.set_permissions(guild.default_role, view_channel=True, send_messages=False if isinstance(ch, discord.TextChannel) else None, read_message_history=True if isinstance(ch, discord.TextChannel) else None)
                 await ch.set_permissions(role, view_channel=False)
-                # бота не трогаем
             except:
                 pass
             continue
@@ -305,9 +332,9 @@ async def setup_base(interaction: discord.Interaction):
         pass
 
     if already_had_channel and has_panel:
-        await interaction.followup.send(f"🔄 Перенастроено! Роль {role.mention} + канал {channel.mention}\n🔒 Скрыто/обновлено {hidden_count} каналов. Без `бусифицированный` теперь видно только {channel.mention}.", ephemeral=True)
+        await interaction.followup.send(f"🔄 Перенастроено! Роль {role.mention} + категория {category.name} + канал {channel.mention}\n🔒 Скрыто/обновлено {hidden_count} каналов. Без `бусифицированный` теперь видно только категорию {category.name}.", ephemeral=True)
     else:
-        await interaction.followup.send(f"✅ Готово! Канал {channel.mention} + роль {role.mention}\n🔒 Скрыто {hidden_count} каналов от непроверенных. Без `бусифицированный` видно только этот канал.", ephemeral=True)
+        await interaction.followup.send(f"✅ Готово! Категория {category.name} + канал {channel.mention} + роль {role.mention}\n🔒 Скрыто {hidden_count} каналов от непроверенных. Без `бусифицированный` видно только этот канал.", ephemeral=True)
 
 @bot.tree.command(name="роли", description="Создать панель с выдачей ролей (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
