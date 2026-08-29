@@ -201,6 +201,86 @@ class RoleButton(discord.ui.Button):
             await interaction.user.add_roles(role)
             await interaction.response.send_message(f"✅ Роль {role.mention} выдана", ephemeral=True)
 
+# ============ ПРОФИЛЬ / МАГАЗИН ПАНЕЛИ (как на скрине Милка) ============
+class ProfileView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Открыть инвентарь", style=discord.ButtonStyle.secondary, custom_id="profile_inv", emoji="📦")
+    async def inv(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bal = get_balance(interaction.user.id)
+        data = load_economy()
+        inv = data.get(str(interaction.user.id), {}).get("items", [])
+        desc = f"💦 Спермики: **{bal}**\n📦 Предметы: {', '.join(inv) if inv else 'пусто'}\n\nКейсы и роли — в #магазин"
+        await interaction.response.send_message(desc, ephemeral=True)
+
+    @discord.ui.button(label="Выбрать роли", style=discord.ButtonStyle.secondary, custom_id="profile_roles", emoji="🎨")
+    async def roles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if not config.SELF_ROLES:
+            await interaction.response.send_message("Роли не настроены", ephemeral=True)
+            return
+        view = RolesButtonView(guild)
+        await interaction.response.send_message("Выбери роли:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Ввести промокод", style=discord.ButtonStyle.secondary, custom_id="profile_promo", emoji="🎟️")
+    async def promo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Промокоды скоро! Следи за анонсами.", ephemeral=True)
+
+class ShopView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Товары за спермики", style=discord.ButtonStyle.primary, custom_id="shop_spermi", emoji="💦")
+    async def spermi(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(title="🛒 Товары за спермики", color=discord.Color.gold())
+        for k, v in SHOP_ITEMS.items():
+            embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
+
+class ShopBuyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        # Динамические кнопки покупки
+        for key in list(SHOP_ITEMS.keys())[:5]:
+            self.add_item(ShopBuyButton(key))
+
+class ShopBuyButton(discord.ui.Button):
+    def __init__(self, key: str):
+        super().__init__(label=f"Купить {key}", style=discord.ButtonStyle.success, custom_id=f"buy_{key}")
+        self.key = key
+    async def callback(self, interaction: discord.Interaction):
+        item = SHOP_ITEMS.get(self.key)
+        if not item:
+            await interaction.response.send_message("Нет такого товара", ephemeral=True)
+            return
+        if get_balance(interaction.user.id) < item["price"]:
+            await interaction.response.send_message(f"❌ Нужно {item['price']} 💦, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
+            return
+        add_spermi(interaction.user.id, -item["price"])
+        # Сохраняем в инвентарь
+        data = load_economy()
+        uid = str(interaction.user.id)
+        if "items" not in data.get(uid, {}):
+            data[uid]["items"] = []
+        data[uid]["items"].append(self.key)
+        save_economy(data)
+        if item["role"]:
+            role = discord.utils.get(interaction.guild.roles, name=item["role"])
+            if not role:
+                try:
+                    role = await interaction.guild.create_role(name=item["role"])
+                except:
+                    pass
+            if role:
+                try:
+                    await interaction.user.add_roles(role)
+                except:
+                    pass
+                await interaction.response.send_message(f"✅ Куплено {self.key} за {item['price']} 💦! Роль {role.mention} выдана. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
+                return
+        await interaction.response.send_message(f"✅ Куплено {self.key}! Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
+
 
 # ============ EVENTS ============
 
@@ -208,6 +288,9 @@ class RoleButton(discord.ui.Button):
 async def on_ready():
     print(f"Бот {bot.user} запущен! На {len(bot.guilds)} серверах")
     bot.add_view(VerifyView())
+    bot.add_view(ProfileView())
+    bot.add_view(ShopView())
+    bot.add_view(ShopBuyView())
     try:
         # Делаем как с /основа - мгновенная синхронизация для твоей гильдии + глобально
         if config.GUILD_ID:
@@ -412,6 +495,86 @@ async def setup_roles(interaction: discord.Interaction, канал: discord.Text
     view = RolesButtonView(guild)
     await ch.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Панель ролей создана в {ch.mention}", ephemeral=True)
+
+@bot.tree.command(name="меню", description="Создать каналы профиль и магазин как у Милки (только админ)")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup_menu(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    # Роль для доступа
+    role = get_verify_role(guild) or discord.utils.get(guild.roles, name="бусифицированный")
+    # Категория Меню
+    category = discord.utils.get(guild.categories, name="Меню")
+    if not category:
+        try:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True)
+            }
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True)
+            category = await guild.create_category("Меню", overwrites=overwrites, reason="/меню")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка категории: {e}", ephemeral=True)
+            return
+
+    # Канал профиль
+    profil_ch = discord.utils.get(guild.text_channels, name="профиль") or discord.utils.get(guild.text_channels, name="🪪・профиль")
+    if not profil_ch:
+        try:
+            profil_ch = await guild.create_text_channel("🪪・профиль", category=category, topic="Профиль, инвентарь и роли", reason="/меню")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка канал профиль: {e}", ephemeral=True)
+            return
+    # Канал магазин
+    shop_ch = discord.utils.get(guild.text_channels, name="магазин") or discord.utils.get(guild.text_channels, name="🛒・магазин")
+    if not shop_ch:
+        try:
+            shop_ch = await guild.create_text_channel("🛒・магазин", category=category, topic="Магазин за спермики", reason="/меню")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Ошибка канал магазин: {e}", ephemeral=True)
+            return
+
+    # Чистим старые бот-сообщения
+    for ch in [profil_ch, shop_ch]:
+        try:
+            async for msg in ch.history(limit=20):
+                if msg.author == guild.me and msg.embeds:
+                    await msg.delete()
+        except:
+            pass
+
+    # Эмбед профиль (как у Милки - розовый)
+    embed_prof = discord.Embed(title="Профиль • Инвентарь и Роли", description="Управляй ролями, инвентарем и спермиками", color=discord.Color.from_rgb(255, 105, 180))
+    embed_prof.add_field(name="📦 Инвентарь", value="Предметы — как пульт ролями. Чтобы получить роль, купи в магазине.", inline=True)
+    embed_prof.add_field(name="🎨 Фоны", value="Крути гачу за спермики и открывай фоны профиля", inline=True)
+    embed_prof.add_field(name="🎭 Роли", value="Цветные роли выделят тебя в чате!", inline=True)
+    embed_prof.set_footer(text="спермики • профиль")
+    bot.add_view(ProfileView())
+    await profil_ch.send(embed=embed_prof, view=ProfileView())
+    # Доп инфа
+    embed_prof2 = discord.Embed(color=discord.Color.from_rgb(255, 105, 180))
+    embed_prof2.description = f"Все твои предметы: кейсы, роли. Покупай в {shop_ch.mention}\nБаланс: /баланс | Ежедневка: /ежедневка"
+    await profil_ch.send(embed=embed_prof2)
+
+    # Эмбед магазин (розовый баннер)
+    embed_shop = discord.Embed(title="МАГАЗИНЫ", description="**Фармим, закупаемся!**", color=discord.Color.from_rgb(255, 105, 180))
+    embed_shop.add_field(name="Валюта — Спермики 💦", value="• Монетки — за сообщения, войс, ивенты\n• Кристаллы — скоро\n• Спермики — за активность, квесты, рулетку", inline=False)
+    embed_shop.set_image(url="https://i.imgur.com/8Km9tLL.png")
+    embed_shop.set_footer(text="Магазин спермиков")
+    bot.add_view(ShopView())
+    bot.add_view(ShopBuyView())
+    await shop_ch.send(embed=embed_shop, view=ShopView())
+
+    # Скрываем категорию Меню от небусифицированных если есть роль
+    if role:
+        try:
+            await category.set_permissions(guild.default_role, view_channel=False)
+            await category.set_permissions(role, view_channel=True)
+        except:
+            pass
+
+    await interaction.followup.send(f"✅ Меню создано: {category.name} → {profil_ch.mention} + {shop_ch.mention}. Вместо команд теперь кнопки как у Милки!", ephemeral=True)
 
 @bot.tree.command(name="очистка", description="Удалить сообщения (только модер)")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -648,6 +811,7 @@ async def roulete_drone(interaction: discord.Interaction, ставка: app_comm
 @setup_verify.error
 @setup_base.error
 @setup_roles.error
+@setup_menu.error
 @clear.error
 @kick.error
 @ban.error
