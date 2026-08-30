@@ -15,18 +15,23 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Используем Postgres если есть DATABASE_URL (Railway), иначе файл
 import urllib.parse as urlparse
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PRIVATE_URL")
 
 def get_db():
-    if not DATABASE_URL:
+    url = DATABASE_URL or os.getenv("DATABASE_URL") or os.getenv("DATABASE_PRIVATE_URL")
+    if not url:
+        print("DB: DATABASE_URL not set, using file")
         return None
+    # Railway дает postgres:// а psycopg2 хочет postgresql://
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
     try:
         import psycopg2
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        conn = psycopg2.connect(url, connect_timeout=5, sslmode="require")
         conn.autocommit = True
         return conn
     except Exception as e:
-        print(f"DB connect fail: {e}")
+        print(f"DB connect fail: {e} url={url[:30]}...")
         return None
 
 def init_db():
@@ -157,9 +162,21 @@ def nuke_balance(user_id: int):
     save_economy(data)
     return 0
 
-# Вызвать при старте
+# Вызвать при старте (и в on_ready тоже)
+def ensure_db():
+    try:
+        init_db()
+        conn = get_db()
+        if conn:
+            print("DB: connected OK, tables ensured")
+            conn.close()
+        else:
+            print("DB: no connection, fallback to file")
+    except Exception as e:
+        print(f"DB ensure fail: {e}")
+
 try:
-    init_db()
+    ensure_db()
 except:
     pass
 
@@ -582,6 +599,11 @@ async def on_ready():
     bot.add_view(ProfileView())
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
+    # Пробуем БД еще раз когда бот уже в сети
+    try:
+        ensure_db()
+    except:
+        pass
     try:
         # Фикс дублей: оставляем только гильдейские (мгновенно) чтобы не было x2
         if config.GUILD_ID:
