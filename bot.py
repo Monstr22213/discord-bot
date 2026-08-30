@@ -573,9 +573,31 @@ async def on_member_join(member: discord.Member):
     if config.WELCOME_CHANNEL_ID:
         ch = bot.get_channel(config.WELCOME_CHANNEL_ID)
         if ch:
-            embed = discord.Embed(title="Добро пожаловать! 👋", description=f"{member.mention}, добро пожаловать на **{member.guild.name}**!\n\nПройди бусификацию в канале верификации.", color=discord.Color.green())
+            guild = member.guild
+            # Красивый welcome
+            embed = discord.Embed(
+                title=f"❄️ Добро пожаловать в {guild.name}! ❄️",
+                description=(
+                    f"Привет, {member.mention}!\n\n"
+                    f"Ты — **{guild.member_count}**-й участник нашего дворца!\n"
+                    f"✨ Пройди **Бусификацию** в <#{discord.utils.get(guild.text_channels, name='🚐・бусификация').id if discord.utils.get(guild.text_channels, name='🚐・бусификация') else 0}>\n"
+                    f"📜 Прочитай правила в <#{discord.utils.get(guild.text_channels, name='rules').id if discord.utils.get(guild.text_channels, name='rules') else (discord.utils.get(guild.text_channels, name='📜・rules').id if discord.utils.get(guild.text_channels, name='📜・rules') else 0)}>\n"
+                    f"🪪 Открой профиль в <#{discord.utils.get(guild.text_channels, name='🪪・профиль').id if discord.utils.get(guild.text_channels, name='🪪・профиль') else 0}> и забирай ежедневку!\n\n"
+                    f"*Рады видеть тебя, не будь душным и фарми спермики!* 💦"
+                ),
+                color=discord.Color.from_rgb(88, 101, 242)
+            )
             embed.set_thumbnail(url=member.display_avatar.url)
-            await ch.send(embed=embed)
+            if guild.icon:
+                embed.set_author(name=guild.name, icon_url=guild.icon.url)
+            embed.set_image(url="https://i.imgur.com/8Km9tLL.png")
+            embed.set_footer(text=f"ID: {member.id} • Зашел: {discord.utils.format_dt(member.joined_at, style='R') if member.joined_at else ''}", icon_url=member.display_avatar.url)
+            embed.add_field(name="🎮 Онлайн", value=f"{len([m for m in guild.members if m.status != discord.Status.offline])} в сети", inline=True)
+            embed.add_field(name="📦 Бустов", value=f"{guild.premium_subscription_count} бустов", inline=True)
+            try:
+                await ch.send(content=f"{member.mention}", embed=embed)
+            except:
+                await ch.send(embed=embed)
     if config.LOG_CHANNEL_ID:
         ch = bot.get_channel(config.LOG_CHANNEL_ID)
         if ch:
