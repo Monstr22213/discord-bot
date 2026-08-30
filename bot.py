@@ -634,14 +634,18 @@ async def on_ready():
     except:
         pass
     try:
-        # Синхронизация: гильдейские мгновенно + глобальные для ЛС
+        # Фикс дублей: оставляем только гильдейские чтобы не было x2 (было 2x /меню и тд)
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             bot.tree.copy_global_to(guild=guild)
             synced_guild = await bot.tree.sync(guild=guild)
             print(f"Синхронизировано для гильдии {config.GUILD_ID}: {len(synced_guild)} команд")
-        synced = await bot.tree.sync()
-        print(f"Синхронизировано глобально {len(synced)} команд (для ЛС)")
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
+            print("Глобальные очищены (1 копия, без дублей)")
+        else:
+            synced = await bot.tree.sync()
+            print(f"Синхронизировано глобально {len(synced)} команд")
     except Exception as e:
         print(f"Ошибка синхронизации: {e}")
 
