@@ -848,6 +848,34 @@ async def publish_rules(interaction: discord.Interaction, канал: discord.Te
     await ch.send(embed=ps_embed)
     await interaction.followup.send(f"✅ Правила опубликованы в {ch.mention}", ephemeral=True)
 
+@bot.tree.command(name="велкомтест", description="Тест приветствия (только админ)")
+@app_commands.checks.has_permissions(administrator=True)
+async def welcometest(interaction: discord.Interaction):
+    guild = interaction.guild
+    ch = bot.get_channel(config.WELCOME_CHANNEL_ID) if config.WELCOME_CHANNEL_ID else interaction.channel
+    if not ch:
+        ch = interaction.channel
+    member = interaction.user
+    embed = discord.Embed(
+        title=f"❄️ Добро пожаловать в {guild.name}! ❄️ (ТЕСТ)",
+        description=(
+            f"Привет, {member.mention}!\n\n"
+            f"Ты — **{guild.member_count}**-й участник нашего дворца!\n"
+            f"✨ Пройди **Бусификацию** в <#{discord.utils.get(guild.text_channels, name='🚐・бусификация').id if discord.utils.get(guild.text_channels, name='🚐・бусификация') else 0}>\n"
+            f"📜 Прочитай правила в <#{discord.utils.get(guild.text_channels, name='rules').id if discord.utils.get(guild.text_channels, name='rules') else 0}>\n"
+            f"🪪 Открой профиль в <#{discord.utils.get(guild.text_channels, name='🪪・профиль').id if discord.utils.get(guild.text_channels, name='🪪・профиль') else 0}> и забирай ежедневку!\n\n"
+            f"*Рады видеть тебя, не будь душным и фарми спермики!* 💦"
+        ),
+        color=discord.Color.from_rgb(88, 101, 242)
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    if guild.icon:
+        embed.set_author(name=guild.name, icon_url=guild.icon.url)
+    embed.set_image(url="https://i.imgur.com/8Km9tLL.png")
+    embed.set_footer(text=f"ID: {member.id} • Тест", icon_url=member.display_avatar.url)
+    await ch.send(content=f"{member.mention}", embed=embed)
+    await interaction.response.send_message(f"✅ Тест отправлен в {ch.mention}", ephemeral=True)
+
 @bot.tree.command(name="очистка", description="Удалить сообщения (только модер)")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, количество: app_commands.Range[int, 1, 100]):
