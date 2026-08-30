@@ -182,11 +182,12 @@ try:
 except:
     pass
 
-# Магазин (убрана любимая_димы)
+# Магазин (убрана любимая_димы, добавлен цвет ника)
 SHOP_ITEMS = {
     "бронь_от_дрона": {"price": 500, "desc": "Защита от дроноеба на 1 день", "role": None},
     "раб_дроноеб": {"price": 777, "desc": "Роль Раб дроноеб 🚁", "role": "Раб дроноеб"},
     "vip_спермик": {"price": 300, "desc": "VIP роль + цвет", "role": "VIP Спермик"},
+    "цвет_ника": {"price": 250, "desc": "Смена цвета ника (выбери цвет после покупки)", "role": "Цветной"},
 }
 
 # Квест Димы - храним в БД если есть, иначе файл
@@ -418,8 +419,14 @@ class ProfileView(discord.ui.View):
         bal = get_balance(interaction.user.id)
         data = load_economy()
         inv = data.get(str(interaction.user.id), {}).get("items", [])
-        desc = f"💦 Спермики: **{bal}**\n📦 Предметы: {', '.join(inv) if inv else 'пусто'}\n\nКейсы и роли — в #магазин"
-        await interaction.response.send_message(desc, ephemeral=True)
+        count = len(inv)
+        if count == 0:
+            embed = discord.Embed(title="Инвентарь", description="*Инвентарь пуст*\nПредметов: 0", color=discord.Color.from_rgb(255, 107, 139))
+        else:
+            embed = discord.Embed(title="Инвентарь", description=f"Предметов: {count}\n" + "\n".join([f"• {x}" for x in inv]), color=discord.Color.from_rgb(255, 107, 139))
+            embed.add_field(name="💦 Спермики", value=str(bal), inline=True)
+        embed.set_footer(text="Только вы видите это сообщение")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Выбрать роли", style=discord.ButtonStyle.secondary, custom_id="profile_roles", emoji="🎨", row=0)
     async def roles(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -479,6 +486,71 @@ class ProfileView(discord.ui.View):
     @discord.ui.button(label="Ввести промокод", style=discord.ButtonStyle.secondary, custom_id="profile_promo", emoji="🎟️", row=2)
     async def promo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PromoModal())
+
+    @discord.ui.button(label="Сменить цвет ника", style=discord.ButtonStyle.secondary, custom_id="profile_color", emoji="🎨", row=2)
+    async def color_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_economy()
+        inv = data.get(str(interaction.user.id), {}).get("items", [])
+        has_color = "цвет_ника" in inv or "vip_спермик" in inv
+        # Также проверяем роли
+        if not has_color:
+            for r in interaction.user.roles:
+                if r.name.lower() in ["цветной", "vip спермик", "цветной"]:
+                    has_color = True
+                    break
+        if not has_color:
+            await interaction.response.send_message("❌ Сначала купи `цвет_ника` в #магазин за 250 💦", ephemeral=True)
+            return
+        view = ColorView()
+        embed = discord.Embed(title="🎨 Смена цвета ника", description="Выбери цвет для ника (роль создастся персонально)", color=discord.Color.from_rgb(255, 107, 139))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class ColorView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    @discord.ui.button(label="Розовый", style=discord.ButtonStyle.secondary, custom_id="color_pink", emoji="💗")
+    async def pink(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_color(interaction, discord.Color.from_rgb(255, 107, 139))
+    @discord.ui.button(label="Синий", style=discord.ButtonStyle.secondary, custom_id="color_blue", emoji="💙")
+    async def blue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_color(interaction, discord.Color.blue())
+    @discord.ui.button(label="Зеленый", style=discord.ButtonStyle.secondary, custom_id="color_green", emoji="💚")
+    async def green(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_color(interaction, discord.Color.green())
+    @discord.ui.button(label="Желтый", style=discord.ButtonStyle.secondary, custom_id="color_yellow", emoji="💛")
+    async def yellow(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_color(interaction, discord.Color.gold())
+    @discord.ui.button(label="Фиолетовый", style=discord.ButtonStyle.secondary, custom_id="color_purple", emoji="💜")
+    async def purple(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_color(interaction, discord.Color.purple())
+    async def set_color(self, interaction: discord.Interaction, color: discord.Color):
+        guild = interaction.guild
+        role_name = f"Цвет-{interaction.user.name}"
+        role = discord.utils.get(guild.roles, name=role_name)
+        if not role:
+            try:
+                role = await guild.create_role(name=role_name, colour=color, reason="Смена цвета ника")
+                # Ставим роль чуть выше @everyone но ниже бота
+                try:
+                    await role.edit(position=guild.me.top_role.position - 1)
+                except:
+                    pass
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Ошибка создания роли: {e}", ephemeral=True)
+                return
+        else:
+            try:
+                await role.edit(colour=color)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+                return
+        # Выдаем роль и убираем старые цветные если есть
+        try:
+            if role not in interaction.user.roles:
+                await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ Цвет ника изменен на {str(color)}! Роль {role.mention}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Нет прав выдать роль (бот ниже)", ephemeral=True)
 
 class ShopView(discord.ui.View):
     def __init__(self):
@@ -553,6 +625,7 @@ async def on_ready():
     print(f"Бот {bot.user} запущен! На {len(bot.guilds)} серверах")
     bot.add_view(VerifyView())
     bot.add_view(ProfileView())
+    bot.add_view(ColorView())
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     # Пробуем БД еще раз когда бот уже в сети
