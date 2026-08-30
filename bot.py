@@ -488,33 +488,26 @@ class ShopView(discord.ui.View):
     async def spermi(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(title="🛒 Товары за спермики", description="Трать спермики, фарми дальше", color=discord.Color.from_rgb(255, 107, 139))
         for k, v in SHOP_ITEMS.items():
-            if "сперм" in k.lower() or k in ["vip_спермик", "бронь_от_дрона"]:
-                embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
-        if len(embed.fields) == 0:
-            for k, v in SHOP_ITEMS.items():
-                embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
-
-    @discord.ui.button(label="Товары за любовь Димы", style=discord.ButtonStyle.secondary, custom_id="shop_dima", emoji="💖")
-    async def dima(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(title="💖 Товары за Любовь Димы", description="Нафармил любимых? Трать!", color=discord.Color.from_rgb(255, 107, 139))
-        embed.add_field(name="любимая_димы — 1000 💦", value="Роль Любимая Димы 💖 (легендарка)", inline=False)
-        embed.add_field(name="Фон 'Дима и ко' — 500 💖", value="Скоро", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
+            embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView(list(SHOP_ITEMS.keys())))
 
     @discord.ui.button(label="Товары за детали дрона", style=discord.ButtonStyle.secondary, custom_id="shop_drone", emoji="🚁")
     async def drone(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(title="🚁 Товары за Детали Дрона", description="Выиграл у раба дроноеба? Трать!", color=discord.Color.from_rgb(255, 107, 139))
-        embed.add_field(name="раб_дроноеб — 777 💦", value="Роль Раб дроноеб 🚁", inline=False)
-        embed.add_field(name="Дрон-скин — 400 🚁", value="Скоро", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView())
+        # Только дрон-товары
+        drone_keys = [k for k in SHOP_ITEMS.keys() if "дрон" in k or k == "раб_дроноеб" or k == "бронь_от_дрона"]
+        for k in drone_keys:
+            v = SHOP_ITEMS[k]
+            embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView(drone_keys))
 
 class ShopBuyView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, items=None):
         super().__init__(timeout=None)
-        # Динамические кнопки покупки
-        for key in list(SHOP_ITEMS.keys())[:5]:
-            self.add_item(ShopBuyButton(key))
+        keys = items if items is not None else list(SHOP_ITEMS.keys())[:5]
+        for key in keys[:5]:
+            if key in SHOP_ITEMS:
+                self.add_item(ShopBuyButton(key))
 
 class ShopBuyButton(discord.ui.Button):
     def __init__(self, key: str):
@@ -844,9 +837,8 @@ async def setup_menu(interaction: discord.Interaction):
     embed_shop = discord.Embed(title="Валюта Сервера", color=discord.Color.from_rgb(255, 107, 139))
     embed_shop.description = "**Фармим, закупаемся!**\nТут всё за мемы сервера:"
     embed_shop.add_field(name="💦 Спермики", value="Получаются за активность: сообщения, войс, ивенты\n`/ежедневка`, `/баланс`, `/перевести`", inline=False)
-    embed_shop.add_field(name="💖 Любовь Димы", value="За квест `Найди любимую Димы` — `/квест-димы` → `/нашел`", inline=False)
-    embed_shop.add_field(name="🚁 Детали Дрона", value="За `Рулетку раба дроноеба` — `/рулетка-дроноеба`\nИспытай удачу и сорви куш!", inline=False)
-    embed_shop.set_footer(text="Black ICE Palace • спермики • любимая Димы • дроноеб")
+    embed_shop.add_field(name="🚁 Детали Дрона", value="За `Рулетку раба дроноеба` — кнопка в профиле `Рулетка дроноеба`\nИспытай удачу и сорви куш!", inline=False)
+    embed_shop.set_footer(text="Black ICE Palace • спермики • дроноеб")
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     await shop_ch.send(embed=embed_shop, view=ShopView())
