@@ -7,22 +7,18 @@ import json
 import os
 import random
 import time
+import urllib.parse as urlparse
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============ ЭКОНОМИКА СПЕРМИКИ (сохранение) ============
-# Используем Postgres если есть DATABASE_URL (Railway), иначе файл
-import urllib.parse as urlparse
-
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PRIVATE_URL")
 
 def get_db():
     url = DATABASE_URL or os.getenv("DATABASE_URL") or os.getenv("DATABASE_PRIVATE_URL")
     if not url:
-        print("DB: DATABASE_URL not set, using file")
         return None
-    # Railway дает postgres:// а psycopg2 хочет postgresql://
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     try:
@@ -31,7 +27,7 @@ def get_db():
         conn.autocommit = True
         return conn
     except Exception as e:
-        print(f"DB connect fail: {e} url={url[:30]}...")
+        print(f"DB connect fail: {e}")
         return None
 
 def init_db():
@@ -49,7 +45,6 @@ def init_db():
     except Exception as e:
         print(f"DB init fail: {e}")
 
-# Фолбэк файлы
 DATA_DIR = "/data" if os.path.exists("/data") else "."
 ECONOMY_FILE = os.path.join(DATA_DIR, "economy.json")
 QUEST_FILE = os.path.join(DATA_DIR, "quest_dima.json")
@@ -164,7 +159,6 @@ def nuke_balance(user_id: int):
     save_economy(data)
     return 0
 
-# Вызвать при старте (и в on_ready тоже)
 def ensure_db():
     try:
         init_db()
@@ -182,7 +176,7 @@ try:
 except:
     pass
 
-# Магазин (убрана любимая_димы, добавлен цвет ника)
+# Магазин
 SHOP_ITEMS = {
     "бронь_от_дрона": {"price": 500, "desc": "Защита от дроноеба на 1 день", "role": None},
     "раб_дроноеб": {"price": 777, "desc": "Роль Раб дроноеб 🚁", "role": "Раб дроноеб"},
@@ -190,61 +184,8 @@ SHOP_ITEMS = {
     "цвет_ника": {"price": 250, "desc": "Смена цвета ника (выбери цвет после покупки)", "role": "Цветной"},
 }
 
-# Квест Димы - храним в БД если есть, иначе файл
-def load_quest():
-    conn = get_db()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT guild_id, data FROM quest")
-            rows = cur.fetchall()
-            data = {}
-            for gid, j in rows:
-                try:
-                    data[gid] = json.loads(j)
-                except:
-                    data[gid] = {}
-            cur.close()
-            conn.close()
-            return data
-        except:
-            try:
-                conn.close()
-            except:
-                pass
-    if not os.path.exists(QUEST_FILE):
-        return {}
-    try:
-        with open(QUEST_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_quest(data):
-    conn = get_db()
-    if conn:
-        try:
-            cur = conn.cursor()
-            for gid, info in data.items():
-                j = json.dumps(info, ensure_ascii=False)
-                cur.execute("INSERT INTO quest (guild_id, data) VALUES (%s,%s) ON CONFLICT (guild_id) DO UPDATE SET data=EXCLUDED.data", (gid, j))
-            # Удаляем удаленные гильдии - очищаем лишние? не нужно
-            cur.close()
-            conn.close()
-            return
-        except Exception as e:
-            print(f"save_quest DB fail: {e}")
-            try:
-                conn.close()
-            except:
-                pass
-    with open(QUEST_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
 # ============ VIEWS ============
-
 def get_verify_role(guild: discord.Guild):
-    # Приоритет: роль по имени "бусифицированный" -> затем ID из .env
     role = discord.utils.get(guild.roles, name="бусифицированный")
     if role:
         return role
@@ -255,7 +196,6 @@ def get_verify_role(guild: discord.Guild):
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
     @discord.ui.button(label="🚐 Пройти Бусификацию", style=discord.ButtonStyle.green, custom_id="verify_btn")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = get_verify_role(interaction.guild)
@@ -268,7 +208,6 @@ class VerifyView(discord.ui.View):
         try:
             await interaction.user.add_roles(role, reason="Верификация через кнопку")
             await interaction.response.send_message(f"✅ Успешно! Тебе выдана роль {role.mention}", ephemeral=True)
-            # лог
             if config.LOG_CHANNEL_ID:
                 ch = bot.get_channel(config.LOG_CHANNEL_ID)
                 if ch:
@@ -279,59 +218,34 @@ class VerifyView(discord.ui.View):
 class RolesView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # Динамически создаем селект если роли настроены
         if config.SELF_ROLES:
-            options = []
-            # Мы не знаем названия ролей на этапе init, поэтому будем резолвить при взаимодействии
-            # Создаем заглушку, реальные названия подтянутся в setup
             self.add_item(RolesSelect())
 
 class RolesSelect(discord.ui.Select):
     def __init__(self):
-        # Создаем опции на основе конфига, названия подтянем позже если нужно
         options = []
-        # Если бот еще не запущен, ставим временные лейблы
-        for role_id in config.SELF_ROLES[:25]:  # лимит дискорда 25
+        for role_id in config.SELF_ROLES[:25]:
             options.append(discord.SelectOption(label=f"Роль {role_id}", value=str(role_id), description="Нажми чтобы получить/снять"))
-        
-        super().__init__(
-            placeholder="Выбери роли...",
-            min_values=0,
-            max_values=len(options) if options else 1,
-            options=options if options else [discord.SelectOption(label="Нет ролей", value="0")],
-            custom_id="roles_select"
-        )
-
+        super().__init__(placeholder="Выбери роли...", min_values=0, max_values=len(options) if options else 1, options=options if options else [discord.SelectOption(label="Нет ролей", value="0")], custom_id="roles_select")
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         member = interaction.user
         selected_ids = set(int(v) for v in self.values)
-        
         added = []
         removed = []
-        
         for role_id in config.SELF_ROLES:
             role = guild.get_role(role_id)
             if not role:
                 continue
             has_role = role in member.roles
             should_have = role_id in selected_ids
-            
             try:
                 if should_have and not has_role:
                     await member.add_roles(role)
                     added.append(role.name)
-                elif not should_have and has_role and role_id in config.SELF_ROLES:
-                    # Снимаем только если роль была в списке самовыдачи и не выбрана
-                    # Чтобы не снимать все подряд, проверяем что юзер что-то выбрал
-                    # Логика: если выбрал пусто - снимем все самовыдаваемые роли
-                    # Поэтому тут нужно отдельно обрабатывать
-                    pass
             except discord.Forbidden:
                 await interaction.response.send_message("❌ Нет прав на выдачу ролей.", ephemeral=True)
                 return
-
-        # Обработка снятия: если роль не выбрана но есть у юзера - снимаем
         for role_id in config.SELF_ROLES:
             role = guild.get_role(role_id)
             if role and role in member.roles and role_id not in selected_ids:
@@ -340,17 +254,13 @@ class RolesSelect(discord.ui.Select):
                     removed.append(role.name)
                 except:
                     pass
-
         msg = []
         if added: msg.append(f"✅ Выдано: {', '.join(added)}")
         if removed: msg.append(f"❌ Снято: {', '.join(removed)}")
         if not msg:
             msg.append("Без изменений.")
-        
         await interaction.response.send_message("\n".join(msg), ephemeral=True)
 
-
-# Упрощенный вариант на кнопках (надежнее если много ролей)
 class RolesButtonView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=None)
@@ -363,7 +273,6 @@ class RoleButton(discord.ui.Button):
     def __init__(self, role: discord.Role):
         super().__init__(label=role.name, style=discord.ButtonStyle.secondary, custom_id=f"role_{role.id}")
         self.role_id = role.id
-
     async def callback(self, interaction: discord.Interaction):
         role = interaction.guild.get_role(self.role_id)
         if not role:
@@ -380,11 +289,8 @@ class TransferModal(discord.ui.Modal, title="Перевести спермики
     target = discord.ui.TextInput(label="Кому (ID или @упоминание)", placeholder="123456789 или @user", required=True, max_length=30)
     amount = discord.ui.TextInput(label="Сколько спермиков", placeholder="100", required=True, max_length=6)
     async def on_submit(self, interaction: discord.Interaction):
-        # Парсим ID
-        raw = self.target.value.strip()
-        # Пытаемся вытащить ID из упоминания <@...>
         import re
-        m = re.search(r"\d{15,}", raw)
+        m = re.search(r"\d{15,}", self.target.value.strip())
         if not m:
             await interaction.response.send_message("❌ Укажи ID или упомяни пользователя", ephemeral=True)
             return
@@ -405,15 +311,54 @@ class TransferModal(discord.ui.Modal, title="Перевести спермики
             return
         add_spermi(interaction.user.id, -amt)
         add_spermi(tid, amt)
-        member = interaction.guild.get_member(tid)
+        member = interaction.guild.get_member(tid) if interaction.guild else None
         name = member.mention if member else f"<@{tid}>"
         await interaction.response.send_message(f"💸 Перевел {amt} 💦 → {name}. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
 
-# ============ ПРОФИЛЬ / МАГАЗИН ПАНЕЛИ (как на скрине Милка) ============
+class PromoModal(discord.ui.Modal, title="Ввести промокод"):
+    code = discord.ui.TextInput(label="Промокод", placeholder="SUPER2026", required=True, max_length=20)
+    async def on_submit(self, interaction: discord.Interaction):
+        code = self.code.value.strip().upper()
+        conn = get_db()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT reward, max_uses, uses FROM promo_codes WHERE code=%s", (code,))
+                row = cur.fetchone()
+                if not row:
+                    await interaction.response.send_message("❌ Неверный промокод", ephemeral=True)
+                    cur.close(); conn.close()
+                    return
+                reward, max_uses, uses = row
+                cur.execute("SELECT 1 FROM promo_uses WHERE code=%s AND user_id=%s", (code, str(interaction.user.id)))
+                if cur.fetchone():
+                    await interaction.response.send_message("❌ Ты уже использовал этот промокод", ephemeral=True)
+                    cur.close(); conn.close()
+                    return
+                if uses >= max_uses:
+                    await interaction.response.send_message("❌ Промокод закончился", ephemeral=True)
+                    cur.close(); conn.close()
+                    return
+                cur.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=%s", (code,))
+                cur.execute("INSERT INTO promo_uses (code, user_id) VALUES (%s,%s)", (code, str(interaction.user.id)))
+                cur.execute("INSERT INTO economy (user_id, balance) VALUES (%s,0) ON CONFLICT (user_id) DO NOTHING", (str(interaction.user.id),))
+                cur.execute("UPDATE economy SET balance = balance + %s WHERE user_id=%s", (reward, str(interaction.user.id)))
+                cur.close(); conn.close()
+                await interaction.response.send_message(f"✅ Промокод активирован! +{reward} 💦", ephemeral=True)
+                return
+            except Exception as e:
+                try:
+                    conn.close()
+                except:
+                    pass
+                await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+                return
+        await interaction.response.send_message("❌ База промокодов не настроена (нет Postgres)", ephemeral=True)
+
+# ============ ПРОФИЛЬ / МАГАЗИН ПАНЕЛИ ============
 class ProfileView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
     @discord.ui.button(label="Открыть инвентарь", style=discord.ButtonStyle.secondary, custom_id="profile_inv", emoji="📦", row=0)
     async def inv(self, interaction: discord.Interaction, button: discord.ui.Button):
         bal = get_balance(interaction.user.id)
@@ -427,7 +372,6 @@ class ProfileView(discord.ui.View):
             embed.add_field(name="💦 Спермики", value=str(bal), inline=True)
         embed.set_footer(text="Только вы видите это сообщение")
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
     @discord.ui.button(label="Выбрать роли", style=discord.ButtonStyle.secondary, custom_id="profile_roles", emoji="🎨", row=0)
     async def roles(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
@@ -436,7 +380,6 @@ class ProfileView(discord.ui.View):
             return
         view = RolesButtonView(guild)
         await interaction.response.send_message("Выбери роли:", view=view, ephemeral=True)
-
     @discord.ui.button(label="Ежедневка +100", style=discord.ButtonStyle.success, custom_id="profile_daily", emoji="💰", row=0)
     async def daily_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_economy()
@@ -454,14 +397,11 @@ class ProfileView(discord.ui.View):
         data[uid]["daily"] = now
         save_economy(data)
         await interaction.response.send_message(f"✅ Получено 100 💦! Баланс: {bal}", ephemeral=True)
-
     @discord.ui.button(label="Перевести", style=discord.ButtonStyle.secondary, custom_id="profile_transfer", emoji="💸", row=1)
     async def transfer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TransferModal())
-
     @discord.ui.button(label="Рулетка дроноеба", style=discord.ButtonStyle.danger, custom_id="profile_roulete", emoji="🚁", row=1)
     async def roulete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Быстрая рулетка на 50 + ядерка на 1
         if get_balance(interaction.user.id) < 50:
             await interaction.response.send_message(f"❌ Нужно 50 💦, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
             return
@@ -469,7 +409,7 @@ class ProfileView(discord.ui.View):
         if roll == 1:
             old = get_balance(interaction.user.id)
             nuke_balance(interaction.user.id)
-            await interaction.response.send_message(f"☢️ **ЯДЕРКА УПАЛА!** Ролл `1/100` — на тебя сбросили ядерку раба дроноеба! Все **{old} 💦** сгорели! Баланс: 0", ephemeral=True)
+            await interaction.response.send_message(f"☢️ **ЯДЕРКА УПАЛА!** Ролл `1/100` — ядерка раба дроноеба! Все **{old} 💦** сгорели! Баланс: 0", ephemeral=True)
             return
         if roll <= 45:
             add_spermi(interaction.user.id, -50)
@@ -482,27 +422,24 @@ class ProfileView(discord.ui.View):
             win = 150
             add_spermi(interaction.user.id, win)
             await interaction.response.send_message(f"🔥 ДЖЕКПОТ! +{win} 💦! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
-
     @discord.ui.button(label="Ввести промокод", style=discord.ButtonStyle.secondary, custom_id="profile_promo", emoji="🎟️", row=2)
     async def promo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PromoModal())
-
     @discord.ui.button(label="Сменить цвет ника", style=discord.ButtonStyle.secondary, custom_id="profile_color", emoji="🎨", row=2)
     async def color_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_economy()
         inv = data.get(str(interaction.user.id), {}).get("items", [])
         has_color = "цвет_ника" in inv or "vip_спермик" in inv
-        # Также проверяем роли
         if not has_color:
             for r in interaction.user.roles:
-                if r.name.lower() in ["цветной", "vip спермик", "цветной"]:
+                if r.name.lower() in ["цветной", "vip спермик"]:
                     has_color = True
                     break
         if not has_color:
             await interaction.response.send_message("❌ Сначала купи `цвет_ника` в #магазин за 250 💦", ephemeral=True)
             return
         view = ColorView()
-        embed = discord.Embed(title="🎨 Смена цвета ника", description="Выбери цвет для ника (роль создастся персонально)", color=discord.Color.from_rgb(255, 107, 139))
+        embed = discord.Embed(title="🎨 Смена цвета ника", description="Выбери цвет для ника", color=discord.Color.from_rgb(255, 107, 139))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 class ColorView(discord.ui.View):
@@ -530,7 +467,6 @@ class ColorView(discord.ui.View):
         if not role:
             try:
                 role = await guild.create_role(name=role_name, colour=color, reason="Смена цвета ника")
-                # Ставим роль чуть выше @everyone но ниже бота
                 try:
                     await role.edit(position=guild.me.top_role.position - 1)
                 except:
@@ -544,34 +480,22 @@ class ColorView(discord.ui.View):
             except Exception as e:
                 await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
                 return
-        # Выдаем роль и убираем старые цветные если есть
         try:
             if role not in interaction.user.roles:
                 await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"✅ Цвет ника изменен на {str(color)}! Роль {role.mention}", ephemeral=True)
+            await interaction.response.send_message(f"✅ Цвет ника изменен! Роль {role.mention}", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Нет прав выдать роль (бот ниже)", ephemeral=True)
+            await interaction.response.send_message("❌ Нет прав выдать роль", ephemeral=True)
 
 class ShopView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
     @discord.ui.button(label="Товары за спермики", style=discord.ButtonStyle.secondary, custom_id="shop_spermi", emoji="💦")
     async def spermi(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(title="🛒 Товары за спермики", description="Трать спермики, фарми дальше", color=discord.Color.from_rgb(255, 107, 139))
         for k, v in SHOP_ITEMS.items():
             embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView(list(SHOP_ITEMS.keys())))
-
-    @discord.ui.button(label="Товары за детали дрона", style=discord.ButtonStyle.secondary, custom_id="shop_drone", emoji="🚁")
-    async def drone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(title="🚁 Товары за Детали Дрона", description="Выиграл у раба дроноеба? Трать!", color=discord.Color.from_rgb(255, 107, 139))
-        # Только дрон-товары
-        drone_keys = [k for k in SHOP_ITEMS.keys() if "дрон" in k or k == "раб_дроноеб" or k == "бронь_от_дрона"]
-        for k in drone_keys:
-            v = SHOP_ITEMS[k]
-            embed.add_field(name=f"{k} — {v['price']} 💦", value=v['desc'], inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=ShopBuyView(drone_keys))
 
 class ShopBuyView(discord.ui.View):
     def __init__(self, items=None):
@@ -594,7 +518,6 @@ class ShopBuyButton(discord.ui.Button):
             await interaction.response.send_message(f"❌ Нужно {item['price']} 💦, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
             return
         add_spermi(interaction.user.id, -item["price"])
-        # Сохраняем в инвентарь
         data = load_economy()
         uid = str(interaction.user.id)
         if "items" not in data.get(uid, {}):
@@ -617,9 +540,7 @@ class ShopBuyButton(discord.ui.Button):
                 return
         await interaction.response.send_message(f"✅ Куплено {self.key}! Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
 
-
 # ============ EVENTS ============
-
 @bot.event
 async def on_ready():
     print(f"Бот {bot.user} запущен! На {len(bot.guilds)} серверах")
@@ -628,13 +549,11 @@ async def on_ready():
     bot.add_view(ColorView())
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
-    # Пробуем БД еще раз когда бот уже в сети
     try:
         ensure_db()
     except:
         pass
     try:
-        # Фикс дублей: оставляем только гильдейские чтобы не было x2 (было 2x /меню и тд)
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             bot.tree.copy_global_to(guild=guild)
@@ -651,19 +570,12 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # Приветствие
     if config.WELCOME_CHANNEL_ID:
         ch = bot.get_channel(config.WELCOME_CHANNEL_ID)
         if ch:
-            embed = discord.Embed(
-                title="Добро пожаловать! 👋",
-                description=f"{member.mention}, добро пожаловать на **{member.guild.name}**!\n\nПройди верификацию и выбери роли в каналах сервера.",
-                color=discord.Color.green()
-            )
+            embed = discord.Embed(title="Добро пожаловать! 👋", description=f"{member.mention}, добро пожаловать на **{member.guild.name}**!\n\nПройди бусификацию в канале верификации.", color=discord.Color.green())
             embed.set_thumbnail(url=member.display_avatar.url)
             await ch.send(embed=embed)
-    
-    # Автолог
     if config.LOG_CHANNEL_ID:
         ch = bot.get_channel(config.LOG_CHANNEL_ID)
         if ch:
@@ -677,16 +589,11 @@ async def on_member_remove(member: discord.Member):
             await ch.send(f"📤 Вышел {member.display_name} `{member.id}`")
 
 # ============ SLASH COMMANDS ============
-
 @bot.tree.command(name="верификация", description="Создать сообщение для верификации (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_verify(interaction: discord.Interaction, канал: discord.TextChannel = None):
     ch = канал or interaction.channel
-    embed = discord.Embed(
-        title="🚐 БУСИФИКАЦИЯ",
-        description="**Добро пожаловать в бусик!**\n\nНажми на кнопку ниже, чтобы пройти бусификацию и получить доступ к серверу!\n\n> ⚠️ Уклонение от бусификации карается ТЦК\n> ✅ После нажатия откроются все каналы.",
-        color=discord.Color.dark_gold()
-    )
+    embed = discord.Embed(title="🚐 БУСИФИКАЦИЯ", description="**Добро пожаловать в бусик!**\n\nНажми на кнопку ниже, чтобы пройти бусификацию и получить доступ к серверу!\n\n> ⚠️ Уклонение от бусификации карается ТЦК\n> ✅ После нажатия откроются все каналы.", color=discord.Color.dark_gold())
     embed.set_image(url="https://i.imgflip.com/6e0a5u.jpg")
     embed.set_footer(text=f"{interaction.guild.name} • Бусификация на связи")
     await ch.send(embed=embed, view=VerifyView())
@@ -697,21 +604,16 @@ async def setup_verify(interaction: discord.Interaction, канал: discord.Tex
 async def setup_base(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-
-    # 1. Роль бусифицированный - создаем если нет
     role = discord.utils.get(guild.roles, name="бусифицированный")
     if not role:
         try:
             role = await guild.create_role(name="бусифицированный", colour=discord.Colour.gold(), reason="Роль для Бусификации /основа")
-            # Ставим роль бота выше чтобы мог выдавать, но ниже админов - Discord сам поставит внизу, админ потом подвинет если надо
         except discord.Forbidden:
-            await interaction.followup.send("❌ Нет прав создавать роль `бусифицированный`. Дай боту `Manage Roles` и роль выше.", ephemeral=True)
+            await interaction.followup.send("❌ Нет прав создавать роль `бусифицированный`.", ephemeral=True)
             return
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка создания роли: {e}", ephemeral=True)
             return
-
-    # 2. Категория + Канал бусификация
     category = discord.utils.get(guild.categories, name="🚐・БУСИФИКАЦИЯ") or discord.utils.get(guild.categories, name="БУСИФИКАЦИЯ")
     if not category:
         cat_overwrites = {
@@ -728,16 +630,13 @@ async def setup_base(interaction: discord.Interaction):
             await interaction.followup.send(f"❌ Ошибка создания категории: {e}", ephemeral=True)
             return
     else:
-        # Обновляем права категории
         try:
             await category.set_permissions(guild.default_role, view_channel=True)
             await category.set_permissions(role, view_channel=False)
         except:
             pass
-
     channel = discord.utils.get(guild.text_channels, name="🚐・бусификация") or discord.utils.get(guild.text_channels, name="бусификация")
     already_had_channel = channel is not None
-    # Проверка панели для дубля - но все равно перенастроим права на всех каналах
     has_panel = False
     if channel:
         try:
@@ -747,13 +646,11 @@ async def setup_base(interaction: discord.Interaction):
                     break
         except:
             pass
-        # Если канал есть но без категории - переносим в категорию
         if channel.category != category:
             try:
                 await channel.edit(category=category)
             except:
                 pass
-
     if not channel:
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
@@ -768,12 +665,9 @@ async def setup_base(interaction: discord.Interaction):
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка создания канала: {e}", ephemeral=True)
             return
-
-    # 3. Скрываем ВСЕ каналы от небусифицированных (@everyone deny, бусифицированный allow)
     hidden_count = 0
     for ch in guild.channels:
         if ch.id == channel.id or ch.id == category.id:
-            # Для категории и канала бусификации - @everyone видит, бусифицированные скрываем
             try:
                 await ch.set_permissions(guild.default_role, view_channel=True, send_messages=False if isinstance(ch, discord.TextChannel) else None, read_message_history=True if isinstance(ch, discord.TextChannel) else None)
                 await ch.set_permissions(role, view_channel=False)
@@ -781,33 +675,14 @@ async def setup_base(interaction: discord.Interaction):
                 pass
             continue
         try:
-            # Ставим @everyone view False - скрываем канал
             await ch.set_permissions(guild.default_role, view_channel=False)
-            # Открываем для роли бусифицированный
             await ch.set_permissions(role, view_channel=True)
             hidden_count += 1
-        except discord.Forbidden:
+        except:
             continue
-        except Exception:
-            continue
-
-    embed = discord.Embed(
-        title="🚐 БУСИФИКАЦИЯ",
-        description="**Вас остановили ТЦК!**\n\nЧтобы избежать поездки в бусике — пройди бусификацию 👇\n\nНажми **Пройти Бусификацию** и получи доступ к серверу.\n\n> 🫡 *Локальный мем сервера — бусификация обязательна*\n> Без роли `бусифицированный` ты не увидишь другие каналы!",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title="🚐 БУСИФИКАЦИЯ", description="**Вас остановили ТЦК!**\n\nЧтобы избежать поездки в бусике — пройди бусификацию 👇\n\nНажми **Пройти Бусификацию** и получи доступ к серверу.\n\n> 🫡 *Локальный мем сервера — бусификация обязательна*\n> Без роли `бусифицированный` ты не увидишь другие каналы!", color=discord.Color.gold())
     embed.set_footer(text=f"{guild.name} • Не сопротивляйся бусификации")
-    # Чистим старые сообщения бота в канале чтобы не спамить
-    try:
-        async for msg in channel.history(limit=10):
-            if msg.author == guild.me and msg.embeds:
-                await msg.delete()
-    except:
-        pass
-
-    # 4. Если панель уже была - не спамим новую, просто обновляем права
     if not has_panel:
-        # Чистим старые сообщения бота чтобы не спамить
         try:
             async for msg in channel.history(limit=10):
                 if msg.author == guild.me and msg.embeds:
@@ -815,29 +690,20 @@ async def setup_base(interaction: discord.Interaction):
         except:
             pass
         await channel.send(embed=embed, view=VerifyView())
-    else:
-        # Обновляем существующую панель если надо
-        pass
-
     if already_had_channel and has_panel:
-        await interaction.followup.send(f"🔄 Перенастроено! Роль {role.mention} + категория {category.name} + канал {channel.mention}\n🔒 Скрыто/обновлено {hidden_count} каналов. Без `бусифицированный` теперь видно только категорию {category.name}.", ephemeral=True)
+        await interaction.followup.send(f"🔄 Перенастроено! Роль {role.mention} + категория {category.name} + канал {channel.mention}\n🔒 Скрыто/обновлено {hidden_count} каналов.", ephemeral=True)
     else:
-        await interaction.followup.send(f"✅ Готово! Категория {category.name} + канал {channel.mention} + роль {role.mention}\n🔒 Скрыто {hidden_count} каналов от непроверенных. Без `бусифицированный` видно только этот канал.", ephemeral=True)
+        await interaction.followup.send(f"✅ Готово! Категория {category.name} + канал {channel.mention} + роль {role.mention}\n🔒 Скрыто {hidden_count} каналов.", ephemeral=True)
 
 @bot.tree.command(name="роли", description="Создать панель с выдачей ролей (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_roles(interaction: discord.Interaction, канал: discord.TextChannel = None):
     if not config.SELF_ROLES:
-        await interaction.response.send_message("❌ В .env не настроены SELF_ROLES. Добавь ID ролей и перезапусти бота.", ephemeral=True)
+        await interaction.response.send_message("❌ В .env не настроены SELF_ROLES.", ephemeral=True)
         return
     ch = канал or interaction.channel
     guild = interaction.guild
-    
-    embed = discord.Embed(
-        title="🎭 Выбор ролей",
-        description="Нажми на кнопку роли, чтобы получить или снять её:\n\n" + "\n".join([f"• <@&{rid}>" for rid in config.SELF_ROLES]),
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title="🎭 Выбор ролей", description="Нажми на кнопку роли, чтобы получить или снять её:\n\n" + "\n".join([f"• <@&{rid}>" for rid in config.SELF_ROLES]), color=discord.Color.gold())
     view = RolesButtonView(guild)
     await ch.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Панель ролей создана в {ch.mention}", ephemeral=True)
@@ -847,9 +713,7 @@ async def setup_roles(interaction: discord.Interaction, канал: discord.Text
 async def setup_menu(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-    # Роль для доступа
     role = get_verify_role(guild) or discord.utils.get(guild.roles, name="бусифицированный")
-    # Категория Меню
     category = discord.utils.get(guild.categories, name="Меню")
     if not category:
         try:
@@ -863,8 +727,6 @@ async def setup_menu(interaction: discord.Interaction):
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка категории: {e}", ephemeral=True)
             return
-
-    # Канал профиль
     profil_ch = discord.utils.get(guild.text_channels, name="профиль") or discord.utils.get(guild.text_channels, name="🪪・профиль")
     if not profil_ch:
         try:
@@ -872,7 +734,6 @@ async def setup_menu(interaction: discord.Interaction):
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка канал профиль: {e}", ephemeral=True)
             return
-    # Канал магазин
     shop_ch = discord.utils.get(guild.text_channels, name="магазин") or discord.utils.get(guild.text_channels, name="🛒・магазин")
     if not shop_ch:
         try:
@@ -880,8 +741,6 @@ async def setup_menu(interaction: discord.Interaction):
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка канал магазин: {e}", ephemeral=True)
             return
-
-    # Чистим старые бот-сообщения
     for ch in [profil_ch, shop_ch]:
         try:
             async for msg in ch.history(limit=20):
@@ -889,28 +748,22 @@ async def setup_menu(interaction: discord.Interaction):
                     await msg.delete()
         except:
             pass
-
-    # Эмбед профиль (как у Милки - розовый) + баннер-гифка сверху
-    embed_banner_prof = discord.Embed(color=discord.Color.from_rgb(255, 105, 180))
+    embed_banner_prof = discord.Embed(color=discord.Color.from_rgb(255, 107, 139))
     embed_banner_prof.set_image(url="https://yt3.ggpht.com/t2oynaaQq3aVvMuzymoqvK6m8VGPu1mV5Krr4x9YRvw0bHEKv4mwXteK3DmTqLo4j2US8OW0b21y4A=s416-c-fcrop64=1,380b0000c7f4ffff-nd-v1-rwa")
     await profil_ch.send(embed=embed_banner_prof)
-    embed_prof = discord.Embed(title="Профиль • Инвентарь и Роли", description="Управляй ролями, инвентарем и спермиками", color=discord.Color.from_rgb(255, 105, 180))
+    embed_prof = discord.Embed(title="Профиль • Инвентарь и Роли", description="Управляй ролями, инвентарем и спермиками", color=discord.Color.from_rgb(255, 107, 139))
     embed_prof.add_field(name="📦 Инвентарь", value="Предметы — как пульт ролями. Чтобы получить роль, купи в магазине.", inline=True)
     embed_prof.add_field(name="🎨 Фоны", value="Крути гачу за спермики и открывай фоны профиля", inline=True)
     embed_prof.add_field(name="🎭 Роли", value="Цветные роли выделят тебя в чате!", inline=True)
     embed_prof.set_footer(text="спермики • профиль")
     bot.add_view(ProfileView())
     await profil_ch.send(embed=embed_prof, view=ProfileView())
-    # Доп инфа
-    embed_prof2 = discord.Embed(color=discord.Color.from_rgb(255, 105, 180))
+    embed_prof2 = discord.Embed(color=discord.Color.from_rgb(255, 107, 139))
     embed_prof2.description = f"Все твои предметы: кейсы, роли. Покупай в {shop_ch.mention}\nБаланс: /баланс | Ежедневка: /ежедневка"
     await profil_ch.send(embed=embed_prof2)
-
-    # Баннер как на скрине - теперь твоя аниме-девочка
     embed_banner = discord.Embed(title="МАГАЗИНЫ — Фармим, закупаемся!", color=discord.Color.from_rgb(255, 107, 139))
     embed_banner.set_image(url="https://img.magnific.com/premium-photo/cute-anime-girl-hoodie-wallpaper_776894-105948.jpg?semt=ais_hybrid")
     await shop_ch.send(embed=embed_banner)
-
     embed_shop = discord.Embed(title="Валюта Сервера", color=discord.Color.from_rgb(255, 107, 139))
     embed_shop.description = "**Фармим, закупаемся!**\nТут всё за мемы сервера:"
     embed_shop.add_field(name="💦 Спермики", value="Получаются за активность: сообщения, войс, ивенты\n`/ежедневка`, `/баланс`, `/перевести`", inline=False)
@@ -919,16 +772,13 @@ async def setup_menu(interaction: discord.Interaction):
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     await shop_ch.send(embed=embed_shop, view=ShopView())
-
-    # Скрываем категорию Меню от небусифицированных если есть роль
     if role:
         try:
             await category.set_permissions(guild.default_role, view_channel=False)
             await category.set_permissions(role, view_channel=True)
         except:
             pass
-
-    await interaction.followup.send(f"✅ Меню создано: {category.name} → {profil_ch.mention} + {shop_ch.mention}. Вместо команд теперь кнопки как у Милки!", ephemeral=True)
+    await interaction.followup.send(f"✅ Меню создано: {category.name} → {profil_ch.mention} + {shop_ch.mention}.", ephemeral=True)
 
 @bot.tree.command(name="правила", description="Опубликовать правила Black ICE Palace в #rules (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -936,15 +786,8 @@ async def publish_rules(interaction: discord.Interaction, канал: discord.Te
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     ch = канал or discord.utils.get(guild.text_channels, name="rules") or discord.utils.get(guild.text_channels, name="📜・rules") or interaction.channel
-
-    # --- Современный embed - один стиль, одна полоска ---
-    embed = discord.Embed(
-        title="📜 ПРАВИЛА BLACK ICE PALACE 2026 edition 📜",
-        description="**Читать обязательно, иначе получишь пизды от жизни**\n\u200b",
-        color=discord.Color.from_rgb(255, 107, 139)  # розовая полоска как у магазина Милки - один цвет
-    )
+    embed = discord.Embed(title="📜 ПРАВИЛА BLACK ICE PALACE 2026 edition 📜", description="**Читать обязательно, иначе получишь пизды от жизни**\n\u200b", color=discord.Color.from_rgb(255, 107, 139))
     embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    # Правила (20 шт) - эмодзи в одном стиле/цвете (розовый акцент)
     rules = (
         "1️⃣ 💗 **Маты можно**, мы не в детском саду. Пизди как хочешь, но если ты через каждое слово хуяришь \"бля\" просто чтобы казаться крутым - ты долбаеб\n\n"
         "2️⃣ 💗 **Чернуха и рофлы разрешены.** Шути про что хочешь, но если твой рофл уровня \"мамка умерла хаха\" - то ты не смешной, ты просто еблан.\n\n"
@@ -968,11 +811,7 @@ async def publish_rules(interaction: discord.Interaction, канал: discord.Te
         "2️⃣0️⃣ 💗 **Если админ сказал - значит так и будет.** Сказал заткнуться - затыкаемся. Сказал в мут - идешь в мут. Спорить с админом - идея уровня пойти пиздить медведя голыми руками."
     )
     embed.description += rules
-    embed.add_field(
-        name="⚖️ Наказания:",
-        value="⚠️ 1 раз - предупреждение и подзатыльник\n🔇 2 раз - мут на 12 часов, подумаешь над поведением\n🔨 3 раз - бан на 3 дня, проветришь жопу\n💀 Дальше - пермач нахуй 👋",
-        inline=False
-    )
+    embed.add_field(name="⚖️ Наказания:", value="⚠️ 1 раз - предупреждение и подзатыльник\n🔇 2 раз - мут на 12 часов\n🔨 3 раз - бан на 3 дня\n💀 Дальше - пермач нахуй 👋", inline=False)
     embed.add_field(name="💸 Пожертвования для бустов -", value="Сканируй QR ниже", inline=False)
     embed.set_footer(text="Black ICE Palace • 2026 • Читать обязательно")
     try:
@@ -980,24 +819,12 @@ async def publish_rules(interaction: discord.Interaction, канал: discord.Te
     except Exception as e:
         await interaction.followup.send(f"❌ Не смог отправить в {ch.mention}: {e}", ephemeral=True)
         return
-
-    # QR код отдельным embed с картинкой - в том же розовом стиле
-    qr_embed = discord.Embed(
-        title="Пожертвования",
-        description="**Уруев Дмитрий Денисович**\nНомер договора `5664748331`",
-        color=discord.Color.from_rgb(255, 107, 139)
-    )
+    qr_embed = discord.Embed(title="Пожертвования", description="**Уруев Дмитрий Денисович**\nНомер договора `5664748331`", color=discord.Color.from_rgb(255, 107, 139))
     qr_embed.set_image(url="https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=5664748331")
     qr_embed.set_footer(text="Отсканируй для доната")
     await ch.send(embed=qr_embed)
-
-    # PS поправка - тоже розовая полоска
-    ps_embed = discord.Embed(
-        description="*P. S. Все пожертвования на сервер носят добровольно-принудительный характер, сказали - делай* 😉",
-        color=discord.Color.from_rgb(255, 107, 139)
-    )
+    ps_embed = discord.Embed(description="*P. S. Все пожертвования на сервер носят добровольно-принудительный характер, сказали - делай* 😉", color=discord.Color.from_rgb(255, 107, 139))
     await ch.send(embed=ps_embed)
-
     await interaction.followup.send(f"✅ Правила опубликованы в {ch.mention}", ephemeral=True)
 
 @bot.tree.command(name="очистка", description="Удалить сообщения (только модер)")
@@ -1062,7 +889,6 @@ async def serverinfo(interaction: discord.Interaction):
     embed.add_field(name="Ролей", value=len(g.roles))
     await interaction.response.send_message(embed=embed)
 
-# ============ СПЕРМИКИ ЭКОНОМИКА ============
 @bot.tree.command(name="баланс", description="Показать баланс спермиков")
 async def balance(interaction: discord.Interaction, пользователь: discord.Member = None):
     user = пользователь or interaction.user
@@ -1088,55 +914,6 @@ async def daily(interaction: discord.Interaction):
     save_economy(data)
     await interaction.response.send_message(f"✅ Получено 100 спермиков! Баланс: {bal}")
 
-# Перевод спермиков - теперь только через профиль (кнопка), слэш удален
-async def transfer(interaction: discord.Interaction, пользователь: discord.Member, количество: int):
-    if пользователь.id == interaction.user.id:
-        await interaction.response.send_message("❌ Себе нельзя", ephemeral=True)
-        return
-    if get_balance(interaction.user.id) < количество:
-        await interaction.response.send_message(f"❌ Недостаточно спермиков. Баланс: {get_balance(interaction.user.id)}", ephemeral=True)
-        return
-    add_spermi(interaction.user.id, -количество)
-    add_spermi(пользователь.id, количество)
-    await interaction.response.send_message(f"💸 {interaction.user.mention} перевел {количество} спермиков → {пользователь.mention}")
-
-# Магазин теперь только через канал #магазин (кнопки), слэш удален
-async def shop(interaction: discord.Interaction):
-    embed = discord.Embed(title="🛒 Магазин спермиков", color=discord.Color.gold())
-    for key, item in SHOP_ITEMS.items():
-        embed.add_field(name=f"{key} — {item['price']} спермиков", value=item['desc'], inline=False)
-    embed.set_footer(text="Купить: /купить <название>")
-    await interaction.response.send_message(embed=embed)
-
-# Покупка теперь только через кнопки магазина, слэш удален
-async def buy(interaction: discord.Interaction, предмет: str):
-    key = предмет.lower()
-    if key not in SHOP_ITEMS:
-        await interaction.response.send_message(f"❌ Нет такого предмета. Магазин: {', '.join(SHOP_ITEMS.keys())}", ephemeral=True)
-        return
-    item = SHOP_ITEMS[key]
-    if get_balance(interaction.user.id) < item["price"]:
-        await interaction.response.send_message(f"❌ Нужно {item['price']} спермиков, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
-        return
-    # Снимаем деньги
-    add_spermi(interaction.user.id, -item["price"])
-    # Выдаем роль если есть
-    if item["role"]:
-        role = discord.utils.get(interaction.guild.roles, name=item["role"])
-        if not role:
-            try:
-                role = await interaction.guild.create_role(name=item["role"], reason="Магазин спермики")
-            except:
-                pass
-        if role:
-            try:
-                await interaction.user.add_roles(role)
-            except:
-                pass
-            await interaction.response.send_message(f"✅ Куплено {key} за {item['price']} 💦! Роль {role.mention} выдана. Баланс: {get_balance(interaction.user.id)}")
-            return
-    await interaction.response.send_message(f"✅ Куплено {key} за {item['price']} 💦! Баланс: {get_balance(interaction.user.id)}")
-
 @bot.tree.command(name="топ-спермиков", description="Топ по спермикам")
 async def top_spermi(interaction: discord.Interaction):
     data = load_economy()
@@ -1154,7 +931,6 @@ async def top_spermi(interaction: discord.Interaction):
 
 # ============ ПРОМОКОДЫ И БАЛАНС (админ в ЛС) ============
 def is_admin_check(interaction: discord.Interaction):
-    # Проверка админа в гильдии или в ЛС через главный сервер
     if interaction.guild and interaction.user.guild_permissions.administrator:
         return True
     if config.GUILD_ID:
@@ -1163,20 +939,12 @@ def is_admin_check(interaction: discord.Interaction):
             m = g.get_member(interaction.user.id)
             if m and m.guild_permissions.administrator:
                 return True
-            # Пробуем фетч
-            try:
-                import asyncio
-                # Синхронно не можем фетчить, пробуем кэш
-                pass
-            except:
-                pass
     return False
 
 class PromoModal(discord.ui.Modal, title="Ввести промокод"):
     code = discord.ui.TextInput(label="Промокод", placeholder="SUPER2026", required=True, max_length=20)
     async def on_submit(self, interaction: discord.Interaction):
         code = self.code.value.strip().upper()
-        # Проверяем БД
         conn = get_db()
         if conn:
             try:
@@ -1188,7 +956,6 @@ class PromoModal(discord.ui.Modal, title="Ввести промокод"):
                     cur.close(); conn.close()
                     return
                 reward, max_uses, uses = row
-                # Проверка уже использовал?
                 cur.execute("SELECT 1 FROM promo_uses WHERE code=%s AND user_id=%s", (code, str(interaction.user.id)))
                 if cur.fetchone():
                     await interaction.response.send_message("❌ Ты уже использовал этот промокод", ephemeral=True)
@@ -1198,10 +965,8 @@ class PromoModal(discord.ui.Modal, title="Ввести промокод"):
                     await interaction.response.send_message("❌ Промокод закончился", ephemeral=True)
                     cur.close(); conn.close()
                     return
-                # Выдаем
                 cur.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=%s", (code,))
                 cur.execute("INSERT INTO promo_uses (code, user_id) VALUES (%s,%s)", (code, str(interaction.user.id)))
-                # Начислить спермики
                 cur.execute("INSERT INTO economy (user_id, balance) VALUES (%s,0) ON CONFLICT (user_id) DO NOTHING", (str(interaction.user.id),))
                 cur.execute("UPDATE economy SET balance = balance + %s WHERE user_id=%s", (reward, str(interaction.user.id)))
                 cur.close(); conn.close()
@@ -1214,7 +979,6 @@ class PromoModal(discord.ui.Modal, title="Ввести промокод"):
                     pass
                 await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
                 return
-        # Фолбэк файл (если нет БД)
         await interaction.response.send_message("❌ База промокодов не настроена (нет Postgres)", ephemeral=True)
 
 @bot.tree.command(name="создать-промокод", description="Создать промокод (только админ, можно в ЛС)")
@@ -1306,16 +1070,13 @@ async def edit_balance(interaction: discord.Interaction, пользовател�
     if not is_admin_check(interaction):
         await interaction.response.send_message("❌ Только админ", ephemeral=True)
         return
-    # Парсим ID
     import re
     m = re.search(r"\d{15,}", пользователь)
     if not m:
         await interaction.response.send_message("❌ Укажи ID или @упоминание", ephemeral=True)
         return
     uid = int(m.group(0))
-    # Количество может быть отрицательным для забора
     new_bal = add_spermi(uid, количество)
-    # Пробуем найти юзера для упоминания
     guild = bot.get_guild(config.GUILD_ID) if config.GUILD_ID else None
     member = guild.get_member(uid) if guild else None
     name = member.mention if member else f"<@{uid}>"
@@ -1324,8 +1085,6 @@ async def edit_balance(interaction: discord.Interaction, пользовател�
 
 @bot.tree.command(name="промокод", description="Активировать промокод")
 async def redeem_promo(interaction: discord.Interaction, код: str):
-    # Вызываем модалку логику напрямую
-    # Создаем фейк взаимодействие через прямой вызов БД
     code = код.strip().upper()
     conn = get_db()
     if not conn:
@@ -1360,35 +1119,12 @@ async def redeem_promo(interaction: discord.Interaction, код: str):
 
 # Квест Димы полностью удален по запросу
 
-# Рулетка теперь только через профиль (кнопка), слэш удален
-async def roulete_drone(interaction: discord.Interaction, ставка: int):
-    if get_balance(interaction.user.id) < ставка:
-        await interaction.response.send_message(f"❌ Нужно {ставка} спермиков, у тебя {get_balance(interaction.user.id)}", ephemeral=True)
-        return
-    roll = random.randint(1, 100)
-    if roll == 1:
-        old = get_balance(interaction.user.id)
-        nuke_balance(interaction.user.id)
-        await interaction.response.send_message(f"☢️ **ЯДЕРКА УПАЛА!** Ролл `1/100` — ядерка раба дроноеба прямо на тебя! Все **{old} 💦** сгорели! Баланс: 0")
-        return
-    if roll <= 45:
-        # проиграл
-        add_spermi(interaction.user.id, -ставка)
-        await interaction.response.send_message(f"💥 Раб дроноеб ебанул! Ты проиграл {ставка} спермиков. Ролл {roll}/100")
-    elif roll <= 90:
-        win = int(ставка * 1.5)
-        add_spermi(interaction.user.id, win)
-        await interaction.response.send_message(f"🚁 Раб дроноеб промахнулся! Выиграл +{win} спермиков! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}")
-    else:
-        win = ставка * 3
-        add_spermi(interaction.user.id, win)
-        await interaction.response.send_message(f"🔥 ДЖЕКПОТ! Раб дроноеб взорвался! +{win} спермиков! Ролл {roll}/100. Баланс: {get_balance(interaction.user.id)}")
-
 # Обработка ошибок прав
 @setup_verify.error
 @setup_base.error
 @setup_roles.error
 @setup_menu.error
+@publish_rules.error
 @clear.error
 @kick.error
 @ban.error
