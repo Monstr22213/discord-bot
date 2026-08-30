@@ -765,10 +765,9 @@ async def setup_menu(interaction: discord.Interaction):
     embed_banner.set_image(url="https://img.magnific.com/premium-photo/cute-anime-girl-hoodie-wallpaper_776894-105948.jpg?semt=ais_hybrid")
     await shop_ch.send(embed=embed_banner)
     embed_shop = discord.Embed(title="Валюта Сервера", color=discord.Color.from_rgb(255, 107, 139))
-    embed_shop.description = "**Фармим, закупаемся!**\nТут всё за мемы сервера:"
-    embed_shop.add_field(name="💦 Спермики", value="Получаются за активность: сообщения, войс, ивенты\n`/ежедневка`, `/баланс`, `/перевести`", inline=False)
-    embed_shop.add_field(name="🚁 Детали Дрона", value="За `Рулетку раба дроноеба` — кнопка в профиле `Рулетка дроноеба`\nИспытай удачу и сорви куш!", inline=False)
-    embed_shop.set_footer(text="Black ICE Palace • спермики • дроноеб")
+    embed_shop.description = "**Фармим, закупаемся!**"
+    embed_shop.add_field(name="💦 Спермики", value="Получаются за активность: сообщения, войс, ивенты\nКнопки в #профиль: `Ежедневка +100`, `Перевести`, `Инвентарь`, `Рулетка дроноеба`", inline=False)
+    embed_shop.set_footer(text="Black ICE Palace • спермики")
     bot.add_view(ShopView())
     bot.add_view(ShopBuyView())
     await shop_ch.send(embed=embed_shop, view=ShopView())
