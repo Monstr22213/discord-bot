@@ -42,6 +42,8 @@ def init_db():
         cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS economy (user_id TEXT PRIMARY KEY, balance INT DEFAULT 0, daily BIGINT DEFAULT 0, items TEXT DEFAULT '[]')")
         cur.execute("CREATE TABLE IF NOT EXISTS quest (guild_id TEXT PRIMARY KEY, data TEXT)")
+        cur.execute("CREATE TABLE IF NOT EXISTS promo_codes (code TEXT PRIMARY KEY, reward INT NOT NULL, max_uses INT DEFAULT 1, uses INT DEFAULT 0, created_by TEXT, created_at BIGINT)")
+        cur.execute("CREATE TABLE IF NOT EXISTS promo_uses (code TEXT, user_id TEXT, PRIMARY KEY(code, user_id))")
         cur.close()
         conn.close()
     except Exception as e:
@@ -450,45 +452,6 @@ class ProfileView(discord.ui.View):
     async def transfer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TransferModal())
 
-    @discord.ui.button(label="Начать квест Димы", style=discord.ButtonStyle.primary, custom_id="profile_quest", emoji="💖", row=1)
-    async def quest_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Личный квест - создается канал только для тебя со смешным названием
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-        funny = random.choice(["схрон-любви-димы", "под-кроватью-димы", "в-гараже-димы", "дима-забыл-любимую", "любимая-на-чердаке", "за-шашлыком-у-димы"])
-        name = f"💖・квест-{interaction.user.name.lower().replace(' ', '-')[:10]}-{funny[:12]}"
-        category = discord.utils.get(guild.categories, name="💖 Квест Димы")
-        if not category:
-            try:
-                category = await guild.create_category("💖 Квест Димы", reason="Квест Димы личный")
-            except:
-                category = None
-        # Проверяем есть ли уже личный канал
-        existing = discord.utils.get(guild.text_channels, name=name)
-        # Создаем личный канал только для игрока
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        }
-        try:
-            ch = await guild.create_text_channel(name, overwrites=overwrites, category=category, topic="Личный квест Димы - ищи любимую", reason="Личный квест Димы")
-            # Добавляем в общий квест список чтобы /нашел работал
-            qdata = load_quest()
-            gid = str(guild.id)
-            if gid not in qdata:
-                qdata[gid] = {"channels": [], "found": {}}
-            if ch.id not in qdata[gid]["channels"]:
-                qdata[gid]["channels"].append(ch.id)
-                # Ограничим до 20 каналов чтобы не разрасталось
-                qdata[gid]["channels"] = qdata[gid]["channels"][-20:]
-            save_quest(qdata)
-            await ch.send(f"{interaction.user.mention} ||💖 любимая Димы спряталась тут! Напиши /нашел чтобы проверить||")
-            await ch.send("Подсказка: выдели скрытый текст выше 👆")
-            await interaction.followup.send(f"✅ Создал личный канал {ch.mention} со смешным названием! Ищи там любимую Димы и пиши `/нашел` прямо в нем!", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
-
     @discord.ui.button(label="Рулетка дроноеба", style=discord.ButtonStyle.danger, custom_id="profile_roulete", emoji="🚁", row=1)
     async def roulete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Быстрая рулетка на 50 + ядерка на 1
@@ -515,7 +478,7 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="Ввести промокод", style=discord.ButtonStyle.secondary, custom_id="profile_promo", emoji="🎟️", row=2)
     async def promo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Промокоды скоро! Следи за анонсами.", ephemeral=True)
+        await interaction.response.send_modal(PromoModal())
 
 class ShopView(discord.ui.View):
     def __init__(self):
@@ -605,20 +568,14 @@ async def on_ready():
     except:
         pass
     try:
-        # Фикс дублей: оставляем только гильдейские (мгновенно) чтобы не было x2
+        # Синхронизация: гильдейские мгновенно + глобальные для ЛС
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
-            # 1. Скопировать глобальные в гильдию и засинкать (мгновенно)
             bot.tree.copy_global_to(guild=guild)
             synced_guild = await bot.tree.sync(guild=guild)
             print(f"Синхронизировано для гильдии {config.GUILD_ID}: {len(synced_guild)} команд")
-            # 2. Очистить глобальные чтобы не дублировались (оставить только гильдейские)
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()
-            print("Глобальные команды очищены (остались только гильдейские, без дублей)")
-        else:
-            synced = await bot.tree.sync()
-            print(f"Синхронизировано глобально {len(synced)} команд")
+        synced = await bot.tree.sync()
+        print(f"Синхронизировано глобально {len(synced)} команд (для ЛС)")
     except Exception as e:
         print(f"Ошибка синхронизации: {e}")
 
@@ -1126,162 +1083,213 @@ async def top_spermi(interaction: discord.Interaction):
     embed = discord.Embed(title="🏆 Топ спермиков", description=desc, color=discord.Color.gold())
     await interaction.response.send_message(embed=embed)
 
-# ============ КВЕСТ ЛЮБИМАЯ ДИМЫ (теперь только через профиль, слэш удален) ============
-async def quest_dima(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild = interaction.guild
-    # Смешные названия для квест-каналов
-    funny_names = ["любимая-димы-на-чердаке", "схрон-любви-димы", "под-кроватью-димы", "в-гараже-димы", "за-шашлыком-димы", "у-дяди-димы-в-подвале", "дима-забыл-где-любимая"]
-    # Создаем категорию для квеста если нет
-    q_category = discord.utils.get(guild.categories, name="💖 Квест Димы")
-    if not q_category:
-        try:
-            q_category = await guild.create_category("💖 Квест Димы", reason="Квест Димы")
-        except:
-            q_category = None
-    # Выбираем 3 рандомных канала кроме системных ИЛИ создаем новые смешные если их мало
-    exclude = ["бусификация", "профиль", "магазин"]
-    channels = [c for c in guild.text_channels if not any(x in c.name.lower() for x in exclude)][:15]
-    # Создаем 3 новых канала со смешными названиями (вместо рандома по существующим)
-    picked = []
-    for _ in range(3):
-        fname = random.choice(funny_names)
-        try:
-            ch = await guild.create_text_channel(fname, category=q_category, topic="Любимая Димы спряталась тут! Пиши /нашел", reason="Квест Димы - личный канал")
-            picked.append(ch)
-        except Exception as e:
-            print(f"Ошибка создания канала квеста: {e}")
-            continue
-    if len(picked) < 3 and len(channels) >= 3:
-        # Фолбэк - берем существующие если не создались
-        picked = random.sample(channels, 3)
-    if not picked:
-        await interaction.followup.send("❌ Не смог создать каналы квеста", ephemeral=True)
-        return
-    quest_data = load_quest()
-    quest_data[str(guild.id)] = {"channels": [c.id for c in picked], "found": {}}
-    save_quest(quest_data)
-    hidden_emoji = "💖"
-    for ch in picked:
-        try:
-            await ch.send(f"||{hidden_emoji} любимая Димы спряталась тут! Напиши /нашел чтобы проверить||")
-            await ch.send(f"**Подсказка:** ищи скрытый текст выше 👆")
-        except:
-            pass
-    await interaction.followup.send(f"✅ Квест запущен! Создано 3 канала со смешным названием: {', '.join([c.mention for c in picked])} — ищи там! +500 спермиков за всех 3!", ephemeral=True)
-
-@bot.tree.command(name="нашел", description="Проверить квест любимая Димы")
-async def found_dima(interaction: discord.Interaction):
-    # Деферим сразу чтобы не было 404 Unknown interaction (этап 2 создает каналы >3 сек)
-    try:
-        await interaction.response.defer(ephemeral=True)
-    except:
-        pass
-    guild = interaction.guild
-    data = load_quest()
-    q = data.get(str(guild.id))
-    if not q:
-        await interaction.followup.send("❌ Квест не запущен. Нажми в #профиль `Начать квест Димы`", ephemeral=True)
-        return
-    ch_id = interaction.channel.id
-    if ch_id not in q["channels"]:
-        await interaction.followup.send("❌ Тут нет любимой Димы, ищи дальше!", ephemeral=True)
-        return
-    uid = str(interaction.user.id)
-    if uid not in q["found"]:
-        q["found"][uid] = []
-    if ch_id in q["found"][uid]:
-        await interaction.followup.send("Ты уже находил тут!", ephemeral=True)
-        return
-    q["found"][uid].append(ch_id)
-    save_quest(data)
-    # Стадия
-    stage = q.get("stage", 1)
-    left = len(q["channels"]) - len(q["found"][uid])
-    if left > 0:
-        await interaction.followup.send(f"💖 Нашел! (Этап {stage}/3) Осталось {left} шт. Ищи дальше!", ephemeral=True)
-        return
-    # Нашел все в этом этапе
-    add_spermi(interaction.user.id, 500)
-    role = discord.utils.get(guild.roles, name="Любимая Димы")
-    if not role:
-        try:
-            role = await guild.create_role(name="Любимая Димы", colour=discord.Colour.pink())
-        except:
-            role = None
-    if role:
-        try:
-            await interaction.user.add_roles(role)
-        except:
-            pass
-    if stage < 3:
-        # Спавним 2 этап (до 3) - создаем 3 новых смешных канала и удаляем старые
-        old_channels = list(q["channels"])
-        q["stage"] = stage + 1
-        q["found"][uid] = []  # сброс для след. этапа
-        # Создаем новые каналы для следующего этапа - приватные для игрока (как просил)
-        funny_names = ["любимая-димы-этап2", f"дима-прячет-снова-{stage+1}", "схрон-2-уровня", "подвал-2", "чердак-2"]
-        q_category = discord.utils.get(guild.categories, name="💖 Квест Димы")
-        if not q_category:
+# ============ ПРОМОКОДЫ И БАЛАНС (админ в ЛС) ============
+def is_admin_check(interaction: discord.Interaction):
+    # Проверка админа в гильдии или в ЛС через главный сервер
+    if interaction.guild and interaction.user.guild_permissions.administrator:
+        return True
+    if config.GUILD_ID:
+        g = bot.get_guild(config.GUILD_ID)
+        if g:
+            m = g.get_member(interaction.user.id)
+            if m and m.guild_permissions.administrator:
+                return True
+            # Пробуем фетч
             try:
-                q_category = await guild.create_category("💖 Квест Димы", reason="Квест Димы")
-            except:
-                q_category = None
-        new_channels = []
-        for _ in range(3):
-            fname = random.choice(funny_names) + f"-{random.randint(10,99)}"
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-            }
-            try:
-                ch = await guild.create_text_channel(fname, category=q_category, overwrites=overwrites, topic=f"Личный этап {stage+1} для {interaction.user.display_name}", reason=f"Квест этап {stage+1} приватный")
-                new_channels.append(ch)
-                await ch.send(f"{interaction.user.mention} ||💖 Этап {stage+1}: любимая Димы снова спряталась тут! /нашел||")
+                import asyncio
+                # Синхронно не можем фетчить, пробуем кэш
+                pass
             except:
                 pass
-        if new_channels:
-            q["channels"] = [c.id for c in new_channels]
-            save_quest(data)
-            # Удаляем старые каналы этапа
-            for cid in old_channels:
-                ch = guild.get_channel(cid)
-                if ch:
-                    try:
-                        await ch.delete(reason=f"Квест этап {stage} завершен")
-                    except:
-                        pass
-            await interaction.followup.send(f"🎉 Этап {stage} пройден! +500 💦 и {role.mention if role else ''}\n➡️ Этап {stage+1}/3 заспавнился: {', '.join([c.mention for c in new_channels])} — ищи там!", ephemeral=True)
+    return False
+
+class PromoModal(discord.ui.Modal, title="Ввести промокод"):
+    code = discord.ui.TextInput(label="Промокод", placeholder="SUPER2026", required=True, max_length=20)
+    async def on_submit(self, interaction: discord.Interaction):
+        code = self.code.value.strip().upper()
+        # Проверяем БД
+        conn = get_db()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT reward, max_uses, uses FROM promo_codes WHERE code=%s", (code,))
+                row = cur.fetchone()
+                if not row:
+                    await interaction.response.send_message("❌ Неверный промокод", ephemeral=True)
+                    cur.close(); conn.close()
+                    return
+                reward, max_uses, uses = row
+                # Проверка уже использовал?
+                cur.execute("SELECT 1 FROM promo_uses WHERE code=%s AND user_id=%s", (code, str(interaction.user.id)))
+                if cur.fetchone():
+                    await interaction.response.send_message("❌ Ты уже использовал этот промокод", ephemeral=True)
+                    cur.close(); conn.close()
+                    return
+                if uses >= max_uses:
+                    await interaction.response.send_message("❌ Промокод закончился", ephemeral=True)
+                    cur.close(); conn.close()
+                    return
+                # Выдаем
+                cur.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=%s", (code,))
+                cur.execute("INSERT INTO promo_uses (code, user_id) VALUES (%s,%s)", (code, str(interaction.user.id)))
+                # Начислить спермики
+                cur.execute("INSERT INTO economy (user_id, balance) VALUES (%s,0) ON CONFLICT (user_id) DO NOTHING", (str(interaction.user.id),))
+                cur.execute("UPDATE economy SET balance = balance + %s WHERE user_id=%s", (reward, str(interaction.user.id)))
+                cur.close(); conn.close()
+                await interaction.response.send_message(f"✅ Промокод активирован! +{reward} 💦", ephemeral=True)
+                return
+            except Exception as e:
+                try:
+                    conn.close()
+                except:
+                    pass
+                await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+                return
+        # Фолбэк файл (если нет БД)
+        await interaction.response.send_message("❌ База промокодов не настроена (нет Postgres)", ephemeral=True)
+
+@bot.tree.command(name="создать-промокод", description="Создать промокод (только админ, можно в ЛС)")
+async def create_promo(interaction: discord.Interaction, код: str, награда: app_commands.Range[int, 1, 10000], лимит: app_commands.Range[int, 1, 1000] = 1):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ Только админ", ephemeral=True)
+        return
+    code = код.strip().upper()
+    conn = get_db()
+    if not conn:
+        await interaction.response.send_message("❌ Нет БД", ephemeral=True)
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO promo_codes (code, reward, max_uses, uses, created_by, created_at) VALUES (%s,%s,%s,0,%s,%s) ON CONFLICT (code) DO NOTHING", (code, награда, лимит, str(interaction.user.id), int(time.time())))
+        if cur.rowcount == 0:
+            await interaction.response.send_message("❌ Такой промокод уже есть", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"✅ Промокод `{code}` создан: +{награда} 💦, лимит {лимит}", ephemeral=True)
+        cur.close(); conn.close()
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+
+@bot.tree.command(name="редактировать-промокод", description="Редактировать промокод (админ, ЛС)")
+async def edit_promo(interaction: discord.Interaction, код: str, награда: app_commands.Range[int, 1, 10000] = None, лимит: app_commands.Range[int, 1, 1000] = None):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ Только админ", ephemeral=True)
+        return
+    code = код.strip().upper()
+    conn = get_db()
+    if not conn:
+        await interaction.response.send_message("❌ Нет БД", ephemeral=True)
+        return
+    try:
+        cur = conn.cursor()
+        if награда is not None:
+            cur.execute("UPDATE promo_codes SET reward=%s WHERE code=%s", (награда, code))
+        if лимит is not None:
+            cur.execute("UPDATE promo_codes SET max_uses=%s WHERE code=%s", (лимит, code))
+        cur.close(); conn.close()
+        await interaction.response.send_message(f"✅ Промокод `{code}` обновлен", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+
+@bot.tree.command(name="удалить-промокод", description="Удалить промокод (админ, ЛС)")
+async def delete_promo(interaction: discord.Interaction, код: str):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ Только админ", ephemeral=True)
+        return
+    code = код.strip().upper()
+    conn = get_db()
+    if not conn:
+        await interaction.response.send_message("❌ Нет БД", ephemeral=True)
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM promo_codes WHERE code=%s", (code,))
+        cur.execute("DELETE FROM promo_uses WHERE code=%s", (code,))
+        cur.close(); conn.close()
+        await interaction.response.send_message(f"✅ Промокод `{code}` удален", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+
+@bot.tree.command(name="список-промокодов", description="Список промокодов (админ, ЛС)")
+async def list_promo(interaction: discord.Interaction):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ Только админ", ephemeral=True)
+        return
+    conn = get_db()
+    if not conn:
+        await interaction.response.send_message("❌ Нет БД", ephemeral=True)
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT code, reward, max_uses, uses FROM promo_codes")
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        if not rows:
+            await interaction.response.send_message("Промокодов нет", ephemeral=True)
             return
-        # Если не создались - просто сброс
-        save_quest(data)
-        await interaction.followup.send(f"🎉 Этап {stage} пройден! +500 💦", ephemeral=True)
-    else:
-        # Финал 3/3 - удаляем каналы квеста
-        await interaction.followup.send(f"🏆 ФИНАЛ! Ты нашел все 3 этапа! +500 💦 и {role.mention if role else ''}\nКаналы квеста удалятся через 5 сек...", ephemeral=True)
-        # Удаляем каналы через задержку
-        import asyncio
-        await asyncio.sleep(5)
-        for cid in q["channels"]:
-            ch = guild.get_channel(cid)
-            if ch:
-                try:
-                    await ch.delete(reason="Квест Димы завершен - финал 3/3")
-                except:
-                    pass
-        # Сброс квеста
-        if str(guild.id) in data:
-            del data[str(guild.id)]
-            save_quest(data)
-        # Удаляем личные квест-каналы тоже если есть (те что создавались через профиль)
-        for ch in guild.text_channels:
-            if "квест-" in ch.name.lower() and "димы" in ch.name.lower():
-                try:
-                    # Только если канал приватный для этого юзера или пустой
-                    await ch.delete(reason="Квест завершен")
-                except:
-                    pass
+        desc = "\n".join([f"`{r[0]}` — +{r[1]} 💦 {r[3]}/{r[2]}" for r in rows])
+        embed = discord.Embed(title="Промокоды", description=desc, color=discord.Color.gold())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+
+@bot.tree.command(name="редактировать-баланс", description="Выдать/забрать спермики (админ, можно в ЛС)")
+async def edit_balance(interaction: discord.Interaction, пользователь: str, количество: int):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ Только админ", ephemeral=True)
+        return
+    # Парсим ID
+    import re
+    m = re.search(r"\d{15,}", пользователь)
+    if not m:
+        await interaction.response.send_message("❌ Укажи ID или @упоминание", ephemeral=True)
+        return
+    uid = int(m.group(0))
+    # Количество может быть отрицательным для забора
+    new_bal = add_spermi(uid, количество)
+    # Пробуем найти юзера для упоминания
+    guild = bot.get_guild(config.GUILD_ID) if config.GUILD_ID else None
+    member = guild.get_member(uid) if guild else None
+    name = member.mention if member else f"<@{uid}>"
+    sign = "+" if количество > 0 else ""
+    await interaction.response.send_message(f"✅ Баланс {name} изменен на {sign}{количество} 💦 → теперь {new_bal}", ephemeral=True)
+
+@bot.tree.command(name="промокод", description="Активировать промокод")
+async def redeem_promo(interaction: discord.Interaction, код: str):
+    # Вызываем модалку логику напрямую
+    # Создаем фейк взаимодействие через прямой вызов БД
+    code = код.strip().upper()
+    conn = get_db()
+    if not conn:
+        await interaction.response.send_message("❌ Нет БД", ephemeral=True)
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT reward, max_uses, uses FROM promo_codes WHERE code=%s", (code,))
+        row = cur.fetchone()
+        if not row:
+            await interaction.response.send_message("❌ Неверный промокод", ephemeral=True)
+            cur.close(); conn.close()
+            return
+        reward, max_uses, uses = row
+        cur.execute("SELECT 1 FROM promo_uses WHERE code=%s AND user_id=%s", (code, str(interaction.user.id)))
+        if cur.fetchone():
+            await interaction.response.send_message("❌ Ты уже использовал", ephemeral=True)
+            cur.close(); conn.close()
+            return
+        if uses >= max_uses:
+            await interaction.response.send_message("❌ Закончился", ephemeral=True)
+            cur.close(); conn.close()
+            return
+        cur.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=%s", (code,))
+        cur.execute("INSERT INTO promo_uses (code, user_id) VALUES (%s,%s)", (code, str(interaction.user.id)))
+        cur.execute("INSERT INTO economy (user_id, balance) VALUES (%s,0) ON CONFLICT (user_id) DO NOTHING", (str(interaction.user.id),))
+        cur.execute("UPDATE economy SET balance = balance + %s WHERE user_id=%s", (reward, str(interaction.user.id)))
+        cur.close(); conn.close()
+        await interaction.response.send_message(f"✅ +{reward} 💦 активировано!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+
+# Квест Димы полностью удален по запросу
 
 # Рулетка теперь только через профиль (кнопка), слэш удален
 async def roulete_drone(interaction: discord.Interaction, ставка: int):
