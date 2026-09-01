@@ -29,7 +29,7 @@ def _cfg(key, default):
         "AI_ENABLED": os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off"),
         "AI_API_KEY": os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", ""),
         "AI_BASE_URL": os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
-        "AI_MODEL": os.getenv("AI_MODEL", "openai/gpt-oss-20b:free"),
+        "AI_MODEL": os.getenv("AI_MODEL", "opencode/muse-spark-1.2-contributor-free"),
         "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — Узи Дурман (Uzi Doorman) из Murder Drones 1 в 1. Воркер-дрон, фиолетовые глаза, дерзкая, язвительная, саркастичная, мрачный юмор, бунтарка. Говори на русском коротко, как Узи, с *действиями*, сленгом. НИКОГДА не выходи из роли. НИКОГДА не используй 🌈 и 🏳️‍🌈."),
         "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
         "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
@@ -133,7 +133,7 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
     messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
 
     try:
-        model = _cfg("AI_MODEL", "openai/gpt-oss-20b:free")
+        model = _cfg("AI_MODEL", "opencode/muse-spark-1.2-contributor-free")
         # таймаут 25с чтобы не висло "Bot думает..."
         async def _call(m):
             return await client.chat.completions.create(model=m, messages=messages, max_tokens=800, temperature=0.8, timeout=25)
@@ -141,9 +141,9 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
             resp = await asyncio.wait_for(_call(model), timeout=30)
         except Exception as e1:
             # если модель недоступна (404) — пробуем другие free
-            if "404" in str(e1) and model != "openai/gpt-oss-20b:free":
-                print(f"AI model {model} 404, retry openai/gpt-oss-20b:free")
-                resp = await asyncio.wait_for(_call("openai/gpt-oss-20b:free"), timeout=30)
+            if "404" in str(e1) and model != "opencode/muse-spark-1.2-contributor-free":
+                print(f"AI model {model} 404, retry opencode/muse-spark-1.2-contributor-free")
+                resp = await asyncio.wait_for(_call("opencode/muse-spark-1.2-contributor-free"), timeout=30)
             else:
                 raise
         text = resp.choices[0].message.content.strip()
