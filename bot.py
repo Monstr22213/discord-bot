@@ -16,7 +16,10 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============ AI CHAT (OpenRouter / OpenAI-compatible) ============
-_ai_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=config.AI_MAX_HISTORY * 2))
+def _cfg(key, default):
+    return getattr(config, key, default)
+
+_ai_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=_cfg("AI_MAX_HISTORY", 6) * 2))
 _ai_cooldown: dict[int, float] = {}
 _ai_client = None
 
@@ -24,11 +27,11 @@ def _get_ai_client():
     global _ai_client
     if _ai_client is not None:
         return _ai_client
-    if not config.AI_API_KEY:
+    if not _cfg("AI_API_KEY", ""):
         return None
     try:
         from openai import AsyncOpenAI
-        _ai_client = AsyncOpenAI(api_key=config.AI_API_KEY, base_url=config.AI_BASE_URL)
+        _ai_client = AsyncOpenAI(api_key=_cfg("AI_API_KEY", ""), base_url=_cfg("AI_BASE_URL", "https://openrouter.ai/api/v1"))
         return _ai_client
     except Exception as e:
         print(f"AI client init fail: {e}")
@@ -36,7 +39,7 @@ def _get_ai_client():
 
 def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
     """Проверяет пинг или имя бота. Возвращает (triggered, cleaned_text)."""
-    if not config.AI_ENABLED:
+    if not _cfg("AI_ENABLED", True):
         return False, ""
     if message.author.bot:
         return False, ""
@@ -52,7 +55,7 @@ def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
         return True, cleaned if cleaned else content
 
     # 2) Ответ на сообщение бота (reply)
-    if config.AI_TRIGGER_ON_REPLY and message.reference and message.reference.message_id:
+    if _cfg("AI_TRIGGER_ON_REPLY", True) and message.reference and message.reference.message_id:
         try:
             ref_id = message.reference.message_id
             # эвристика: если в истории канала последнее от бота — считаем reply триггером
@@ -65,7 +68,7 @@ def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
 
     # 3) Имя бота в начале сообщения (или где угодно, если имя отдельное слово)
     # Собираем триггеры: из .env + имя бота + display_name + username
-    triggers = set(config.AI_TRIGGER_NAMES)
+    triggers = set(_cfg("AI_TRIGGER_NAMES", []))
     if bot.user:
         triggers.add(bot.user.name.lower())
         triggers.add(bot.user.display_name.lower())
@@ -97,17 +100,17 @@ def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
 async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
     client = _get_ai_client()
     if not client:
-        return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` в .env (https://openrouter.ai/keys)"
+        return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` в Variables на Railway (https://openrouter.ai/keys)"
     # история канала
     hist = _ai_history[channel_id]
-    messages = [{"role": "system", "content": config.AI_SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")}]
     for m in hist:
         messages.append(m)
     messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
 
     try:
         resp = await client.chat.completions.create(
-            model=config.AI_MODEL,
+            model=_cfg("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
             messages=messages,
             max_tokens=800,
             temperature=0.8,
@@ -741,7 +744,7 @@ async def on_message(message: discord.Message):
     # Кулдаун анти-спам
     now = time.time()
     last = _ai_cooldown.get(message.author.id, 0)
-    if now - last < config.AI_COOLDOWN:
+    if now - last < _cfg("AI_COOLDOWN", 5):
         # молча игнорим или можно реагировать
         return
     _ai_cooldown[message.author.id] = now
@@ -1330,11 +1333,11 @@ async def redeem_promo(interaction: discord.Interaction, код: str):
 @app_commands.describe(prompt="Что спросить у бота")
 async def ai_chat(interaction: discord.Interaction, prompt: str):
     try:
-        if not config.AI_ENABLED:
+        if not _cfg("AI_ENABLED", True):
             await interaction.response.send_message("❌ AI выключен (AI_ENABLED=false)", ephemeral=True)
             return
-        if not config.AI_API_KEY:
-            await interaction.response.send_message("❌ AI не настроен: нет OPENROUTER_API_KEY в .env\nВозьми ключ на https://openrouter.ai/keys и добавь в .env / Render Environment", ephemeral=True)
+        if not _cfg("AI_API_KEY", ""):
+            await interaction.response.send_message("❌ AI не настроен: нет OPENROUTER_API_KEY в Variables на Railway\nВозьми ключ на https://openrouter.ai/keys и добавь в Variables -> New Variable", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
         answer = await _ask_ai(prompt[:1500], interaction.channel_id or 0, interaction.user.display_name)
@@ -1363,16 +1366,16 @@ async def ai_reset(interaction: discord.Interaction):
 
 @bot.tree.command(name="ai-status", description="Статус AI")
 async def ai_status(interaction: discord.Interaction):
-    enabled = "✅ Вкл" if config.AI_ENABLED else "❌ Выкл"
-    has_key = "✅ есть" if config.AI_API_KEY else "❌ нет (добавь OPENROUTER_API_KEY)"
-    names = ", ".join(config.AI_TRIGGER_NAMES) if config.AI_TRIGGER_NAMES else "(только пинг + имя бота)"
+    enabled = "✅ Вкл" if _cfg("AI_ENABLED", True) else "❌ Выкл"
+    has_key = "✅ есть" if _cfg("AI_API_KEY", "") else "❌ нет (добавь OPENROUTER_API_KEY в Variables)"
+    names = ", ".join(_cfg("AI_TRIGGER_NAMES", [])) if _cfg("AI_TRIGGER_NAMES", []) else "(только пинг + имя бота)"
     embed = discord.Embed(title="🤖 AI статус", color=discord.Color.blurple())
     embed.add_field(name="Включен", value=enabled, inline=True)
     embed.add_field(name="Ключ", value=has_key, inline=True)
-    embed.add_field(name="Модель", value=f"`{config.AI_MODEL}`", inline=False)
+    embed.add_field(name="Модель", value=f"`{_cfg('AI_MODEL','?')}`", inline=False)
     embed.add_field(name="Триггеры", value=names, inline=False)
     embed.add_field(name="Как общаться", value="• Пингани бота: `@бот привет`\n• Назови по имени: `мила как дела?`\n• Или `/ai prompt: привет`", inline=False)
-    embed.set_footer(text=f"Base: {config.AI_BASE_URL} • Кулдаун {config.AI_COOLDOWN}с")
+    embed.set_footer(text=f"Base: {_cfg('AI_BASE_URL','?')} • Кулдаун {_cfg('AI_COOLDOWN',5)}с")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Глобальный обработчик ошибок slash-команд — чтобы не было "Приложение не отвечает"
