@@ -17,7 +17,21 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============ AI CHAT (OpenRouter / OpenAI-compatible) ============
 def _cfg(key, default):
-    return getattr(config, key, default)
+    if hasattr(config, key):
+        return getattr(config, key)
+    # fallback если на хосте старый config.py без AI_ полей — читаем напрямую из env
+    _env_map = {
+        "AI_ENABLED": os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off"),
+        "AI_API_KEY": os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", ""),
+        "AI_BASE_URL": os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
+        "AI_MODEL": os.getenv("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
+        "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко."),
+        "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
+        "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
+        "AI_MAX_HISTORY": int(os.getenv("AI_MAX_HISTORY", "6") or 6),
+        "AI_COOLDOWN": int(os.getenv("AI_COOLDOWN", "5") or 5),
+    }
+    return _env_map.get(key, default)
 
 _ai_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=_cfg("AI_MAX_HISTORY", 6) * 2))
 _ai_cooldown: dict[int, float] = {}
