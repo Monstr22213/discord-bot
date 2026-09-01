@@ -328,7 +328,6 @@ async def _music_enqueue(msg: discord.Message, query: str):
         if last_err:
             raise last_err
         return None
-            return info
     try:
         info = await loop.run_in_executor(None, _extract)
     except Exception as e:
