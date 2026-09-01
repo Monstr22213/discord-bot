@@ -126,7 +126,7 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
     hist = _ai_history[channel_id]
     # обогащаем system prompt контекстом: кто пишет
     base_prompt = _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")
-    ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Тебе пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Сообщения формата 'Имя: текст' — запоминай кто есть кто и отвечай по лору: если 'N'/'Serial Designation N' — добрый наивный краш, к нему мягко-цундере; если 'V'/'Vi' — дерзкая подруга, на равных; если 'J' — враждебно; если 'Syn'/'Сын' — НЕНАВИДИШЬ, она пыталась убить N, твоего N! К Syn максимально враждебно, защищаешь N: 'Syn, тронешь N — разнесу!'; Khan — бурчи как на отца; остальные — обычные воркеры. Обращайся по имени.]"
+    ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Сейчас пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Формат 'Автор: текст' — АВТОР это кто написал, а @упоминания внутри текста — ДРУГИЕ люди, не путай! Пример: 'Serial Designation V: Узи, @hanacoamilla сказал что твой рейлган говно' — автор V, hanacoamilla — третий человек. Отвечай автору, про упомянутого суди как про незнакомца-воркера. Лор: если автор 'N' — добрый краш, мягко-цундере; 'V/Vi' — дерзкая подруга, на равных; 'J' — враждебно; 'Syn' — НЕНАВИДИШЬ (пыталась убить N) 'Syn, тронешь N — разнесу!'; Khan — бурчи; остальные типа hanacoamilla — обычные воркеры, нейтрально-язвительно. Обращайся по имени автора.]"
     messages = [{"role": "system", "content": base_prompt + ctx}]
     for m in hist:
         messages.append(m)
@@ -977,13 +977,24 @@ async def on_message(message: discord.Message):
         await message.reply("👋 Да, я тут! Напиши вопрос после моего имени или пинга. Напр: `@бот как дела?` или `мила расскажи анекдот`")
         return
 
+    # Резолвим пинги внутри промпта: <@123> -> @Имя, чтобы понимала про кого речь (не путать автора и упомянутого)
+    resolved_prompt = prompt
+    for u in message.mentions:
+        if u.id != bot.user.id:
+            resolved_prompt = resolved_prompt.replace(f"<@{u.id}>", f"@{u.display_name}").replace(f"<@!{u.id}>", f"@{u.display_name}")
+    # также резолвим роли <@&id>
+    if message.guild:
+        for r in message.role_mentions:
+            resolved_prompt = resolved_prompt.replace(f"<@&{r.id}>", f"@{r.name}")
+    if len(resolved_prompt) > 1500:
+        resolved_prompt = resolved_prompt[:1500]
     # Защита от слишком длинных промптов
     if len(prompt) > 1500:
         prompt = prompt[:1500]
 
     async with message.channel.typing():
         # небольшая задержка чтобы выглядело живее, + даем время набрать историю
-        answer = await _ask_ai(prompt, message.channel.id, message.author.display_name, message.author.id, message.guild.name if message.guild else "")
+        answer = await _ask_ai(resolved_prompt, message.channel.id, message.author.display_name, message.author.id, message.guild.name if message.guild else "")
 
     try:
         await message.reply(answer, mention_author=False, allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
