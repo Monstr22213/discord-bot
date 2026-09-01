@@ -376,7 +376,7 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
     if _start_any(names, "зайди", "зайди ко мне", "зайди к нам", "го в войс", "го к нам", "присоединись", "зайди в войс"):
         await _music_join(message)
         return True
-    if _start_any(names, "выйди", "ливни", "покинь", "уйди", "выйди из войса"):
+    if _start_any(names, "выйди", "ливни", "ливнуть", "ливать", "покинь", "уйди", "выйди из войса", "ливни из войса"):
         await _music_leave(message)
         return True
     # умные музыкальные триггеры: "узи включи/поставь/добавь/запусти/в очередь/плей"
