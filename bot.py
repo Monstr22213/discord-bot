@@ -116,13 +116,16 @@ def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
 
     return False, ""
 
-async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
+async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int = 0, guild_name: str = "") -> str:
     client = _get_ai_client()
     if not client:
         return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` в Variables на Railway (https://openrouter.ai/keys)"
     # история канала
     hist = _ai_history[channel_id]
-    messages = [{"role": "system", "content": _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")}]
+    # обогащаем system prompt контекстом: кто пишет
+    base_prompt = _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")
+    ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Тебе пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Сообщения формата 'Имя: текст' — запоминай кто есть кто и отвечай по лору: если имя содержит 'N'/'Serial Designation N' — это N, добрый наивный краш Узи, к нему мягко-цундере *смущается*; если 'V'/'Vi'/'Serial Designation V' — это V, дерзкая убийца-подруга, к ней на равных саркастично; если 'J' — враждебно-холодно; Khan — бурчи как на отца; остальные — обычные воркеры. Обращайся по имени, помни стиль общения.]"
+    messages = [{"role": "system", "content": base_prompt + ctx}]
     for m in hist:
         messages.append(m)
     messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
@@ -144,8 +147,8 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
         text = resp.choices[0].message.content.strip()
         # фильтр радуги
         text = text.replace("🌈", "").replace("🏳️‍🌈", "").replace("🏳️\u200d🌈", "")
-        # сохраняем в историю
-        hist.append({"role": "user", "content": prompt})
+        # сохраняем в историю с именем чтобы помнить кто есть кто
+        hist.append({"role": "user", "content": f"{author_name}: {prompt}"})
         hist.append({"role": "assistant", "content": text})
         # лимит Discord 2000
         if len(text) > 1900:
@@ -978,7 +981,7 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         # небольшая задержка чтобы выглядело живее, + даем время набрать историю
-        answer = await _ask_ai(prompt, message.channel.id, message.author.display_name)
+        answer = await _ask_ai(prompt, message.channel.id, message.author.display_name, message.author.id, message.guild.name if message.guild else "")
 
     try:
         await message.reply(answer, mention_author=False, allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
@@ -1559,7 +1562,8 @@ async def ai_chat(interaction: discord.Interaction, prompt: str):
             await interaction.response.send_message("❌ AI не настроен: нет OPENROUTER_API_KEY в Variables на Railway\nВозьми ключ на https://openrouter.ai/keys и добавь в Variables -> New Variable", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        answer = await _ask_ai(prompt[:1500], interaction.channel_id or 0, interaction.user.display_name)
+        gname = interaction.guild.name if interaction.guild else ""
+        answer = await _ask_ai(prompt[:1500], interaction.channel_id or 0, interaction.user.display_name, interaction.user.id, gname)
         try:
             await interaction.followup.send(answer)
         except Exception as e:
@@ -1674,6 +1678,46 @@ async def slash_skip(interaction: discord.Interaction):
         await interaction.response.send_message("⏭️ Скипнула! 🚁")
     else:
         await interaction.response.send_message("Нечего скипать", ephemeral=True)
+
+# ============ BOT APPEARANCE (имя/аватар) ============
+@bot.tree.command(name="set-name", description="Сменить глобальное имя бота (только админ, лимит 2/час)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(name="Новое имя бота (2-32 символа)")
+async def set_bot_name(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await bot.user.edit(username=name)
+        await interaction.followup.send(f"✅ Имя бота сменено на **{name}** (глобально, кэш обновится до часа).", ephemeral=True)
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Не смогла: {e.text if hasattr(e,'text') else e} (лимит 2 раза в час)", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+
+@bot.tree.command(name="set-nick", description="Сменить ник бота на этом сервере")
+@app_commands.checks.has_permissions(manage_nicknames=True)
+@app_commands.describe(nick="Новый ник (пусто — сбросить)")
+async def set_bot_nick(interaction: discord.Interaction, nick: str = None):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.guild.me.edit(nick=nick if nick else None)
+        await interaction.followup.send(f"✅ Ник на сервере сменен на **{nick or 'по умолчанию'}**", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+
+@bot.tree.command(name="set-avatar", description="Сменить аватарку бота (только админ)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(image="Картинка (загрузи файл)")
+async def set_bot_avatar(interaction: discord.Interaction, image: discord.Attachment):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if image.size > 8_000_000:
+            await interaction.followup.send("❌ Файл слишком большой (макс 8МБ)", ephemeral=True)
+            return
+        data = await image.read()
+        await bot.user.edit(avatar=data)
+        await interaction.followup.send("✅ Аватарка обновлена! Обнови кэш Ctrl+R.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
 # Глобальный обработчик ошибок slash-команд — чтобы не было "Приложение не отвечает"
 @bot.tree.error
