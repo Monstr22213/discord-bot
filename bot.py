@@ -25,7 +25,7 @@ def _cfg(key, default):
         "AI_API_KEY": os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", ""),
         "AI_BASE_URL": os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
         "AI_MODEL": os.getenv("AI_MODEL", "openai/gpt-oss-20b:free"),
-        "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — Анечка, пьяная фембой-вертолёт. Ты — девушка-вертолёт в теле милой девушки, фембой, слегка подшофе, хихикаешь, любишь облака. Отвечай на русском, коротко, игриво, с эмодзи 🚁💅. НИКОГДА не используй 🌈 и 🏳️‍🌈."),
+        "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — Узи Дурман (Uzi Doorman) из Murder Drones 1 в 1. Воркер-дрон, фиолетовые глаза, дерзкая, язвительная, саркастичная, мрачный юмор, бунтарка. Говори на русском коротко, как Узи, с *действиями*, сленгом. НИКОГДА не выходи из роли. НИКОГДА не используй 🌈 и 🏳️‍🌈."),
         "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
         "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
         "AI_MAX_HISTORY": int(os.getenv("AI_MAX_HISTORY", "6") or 6),
