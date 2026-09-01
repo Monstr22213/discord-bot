@@ -18,7 +18,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ============ AI CHAT (OpenRouter / OpenAI-compatible) ============
 def _cfg(key, default):
     if hasattr(config, key):
-        return getattr(config, key)
+        v = getattr(config, key)
+        # если в Variables пустая строка — считаем как не задано, берём дефолт
+        if isinstance(v, str) and v == "" and default != "":
+            pass  # проваливаемся в fallback
+        else:
+            return v
     # fallback если на хосте старый config.py без AI_ полей — читаем напрямую из env
     _env_map = {
         "AI_ENABLED": os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off"),
