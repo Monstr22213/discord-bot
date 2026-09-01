@@ -1327,27 +1327,41 @@ async def redeem_promo(interaction: discord.Interaction, код: str):
 
 # ============ AI SLASH COMMANDS ============
 @bot.tree.command(name="ai", description="Спросить у AI (работает и по пингу/имени)")
-@app_commands.describe(вопрос="Что спросить у бота")
-async def ai_chat(interaction: discord.Interaction, вопрос: str):
-    if not config.AI_ENABLED:
-        await interaction.response.send_message("❌ AI выключен (AI_ENABLED=false)", ephemeral=True)
-        return
-    if not config.AI_API_KEY:
-        await interaction.response.send_message("❌ AI не настроен: нет OPENROUTER_API_KEY в .env", ephemeral=True)
-        return
-    await interaction.response.defer()
-    answer = await _ask_ai(вопрос[:1500], interaction.channel_id, interaction.user.display_name)
+@app_commands.describe(prompt="Что спросить у бота")
+async def ai_chat(interaction: discord.Interaction, prompt: str):
     try:
-        await interaction.followup.send(answer)
-    except:
-        await interaction.followup.send(answer[:1900])
+        if not config.AI_ENABLED:
+            await interaction.response.send_message("❌ AI выключен (AI_ENABLED=false)", ephemeral=True)
+            return
+        if not config.AI_API_KEY:
+            await interaction.response.send_message("❌ AI не настроен: нет OPENROUTER_API_KEY в .env\nВозьми ключ на https://openrouter.ai/keys и добавь в .env / Render Environment", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        answer = await _ask_ai(prompt[:1500], interaction.channel_id or 0, interaction.user.display_name)
+        try:
+            await interaction.followup.send(answer)
+        except Exception as e:
+            print(f"ai followup fail: {e}")
+            try:
+                await interaction.followup.send(answer[:1900])
+            except:
+                pass
+    except Exception as e:
+        print(f"ai_chat error: {e}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Ошибка AI: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Ошибка AI: {e}", ephemeral=True)
+        except:
+            pass
 
-@bot.tree.command(name="ai-сброс", description="Сбросить историю AI в этом канале")
+@bot.tree.command(name="ai-reset", description="Сбросить историю AI в этом канале")
 async def ai_reset(interaction: discord.Interaction):
-    _ai_history[interaction.channel_id].clear()
+    _ai_history[interaction.channel_id or 0].clear()
     await interaction.response.send_message("✅ История AI в этом канале очищена", ephemeral=True)
 
-@bot.tree.command(name="ai-статус", description="Статус AI")
+@bot.tree.command(name="ai-status", description="Статус AI")
 async def ai_status(interaction: discord.Interaction):
     enabled = "✅ Вкл" if config.AI_ENABLED else "❌ Выкл"
     has_key = "✅ есть" if config.AI_API_KEY else "❌ нет (добавь OPENROUTER_API_KEY)"
@@ -1357,9 +1371,24 @@ async def ai_status(interaction: discord.Interaction):
     embed.add_field(name="Ключ", value=has_key, inline=True)
     embed.add_field(name="Модель", value=f"`{config.AI_MODEL}`", inline=False)
     embed.add_field(name="Триггеры", value=names, inline=False)
-    embed.add_field(name="Как общаться", value="• Пингани бота: `@бот привет`\n• Назови по имени: `мила как дела?`\n• Или `/ai вопрос: привет`", inline=False)
+    embed.add_field(name="Как общаться", value="• Пингани бота: `@бот привет`\n• Назови по имени: `мила как дела?`\n• Или `/ai prompt: привет`", inline=False)
     embed.set_footer(text=f"Base: {config.AI_BASE_URL} • Кулдаун {config.AI_COOLDOWN}с")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# Глобальный обработчик ошибок slash-команд — чтобы не было "Приложение не отвечает"
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    print(f"App command error: {error} | command={interaction.command.name if interaction.command else '?'}")
+    try:
+        msg = f"❌ Ошибка: {error}"
+        if isinstance(error, app_commands.CommandOnCooldown):
+            msg = f"⏳ Кулдаун, попробуй через {error.retry_after:.1f}с"
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except:
+        pass
 
 # Квест Димы полностью удален по запросу
 
