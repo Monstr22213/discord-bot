@@ -282,16 +282,24 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
     try:
         if vc and vc.is_connected():
             if vc.channel.id == channel.id:
-                # уже тут — молча, без спама (убрано "Я уже тут" по просьбе)
                 return True
-            await vc.move_to(channel)
+            try:
+                await vc.move_to(channel)
+            except Exception as e:
+                if "Already connected" in str(e):
+                    return True
+                raise
         else:
-            await channel.connect(self_deaf=False)
-        if not silent:
-            # убрано спам-сообщение "Скажи Анечка включи <песня>" — теперь молча заходит
-            pass
+            try:
+                await channel.connect(self_deaf=False)
+            except Exception as e:
+                if "Already connected" in str(e):
+                    return True
+                raise
         return True
     except Exception as e:
+        if "Already connected" in str(e):
+            return True
         await msg.reply(f"❌ Не смогла зайти: {e}", mention_author=False)
         return False
 
@@ -314,10 +322,10 @@ def _music_play_next(guild: discord.Guild):
     item = q.popleft()
     _now_playing[guild.id] = item
     try:
-        # yt-dlp уже дал прямой url — оборачиваем в PCMVolumeTransformer для регулировки громкости, бас через ffmpeg
+        # yt-dlp уже дал прямой url — PCMVolumeTransformer требует PCM источник, поэтому FFmpegPCMAudio
         use_bass = _music_bass.get(guild.id, False)
         opts = FFMPEG_BASS_OPTIONS if use_bass else FFMPEG_OPTIONS
-        base_source = discord.FFmpegOpusAudio(item["url"], **opts)
+        base_source = discord.FFmpegPCMAudio(item["url"], **opts)
         vol = _music_volume.get(guild.id, 0.5)
         source = discord.PCMVolumeTransformer(base_source, volume=vol)
         def after(err):
@@ -375,6 +383,19 @@ async def _music_enqueue(msg: discord.Message, query: str):
     loop = asyncio.get_event_loop()
     def _extract():
         last_err = None
+        # для поиска сначала получаем результаты без ограничения формата — иначе ytsearch падает на "Requested format is not available"
+        def _get_search_entries(ydl):
+            try:
+                search = ydl.extract_info(f"ytsearch5:{query}", download=False)
+                return search.get("entries") or []
+            except Exception as e:
+                # даже поиск с форматом мог упасть — пробуем без формата
+                try:
+                    with yt_dlp.YoutubeDL({**ydl_opts, "format": None, "extractor_args": {"youtube": {"player_client": ["web"]}}}) as ydl2:
+                        search = ydl2.extract_info(f"ytsearch5:{query}", download=False)
+                        return search.get("entries") or []
+                except:
+                    raise e
         for clients in client_sets:
             for fmt in format_tries:
                 opts = ydl_opts.copy()
@@ -389,31 +410,40 @@ async def _music_enqueue(msg: discord.Message, query: str):
                             info = ydl.extract_info(query, download=False)
                             return info
                         else:
-                            # ищем 5 результатов и пробуем каждый — первый часто без аудио
-                            search = ydl.extract_info(f"ytsearch5:{query}", download=False)
-                            entries = search.get("entries") or []
-                            for entry in entries:
-                                if not entry:
+                            # поиск без формата — чтобы не падать на s7wgU89yGb0
+                            # делаем отдельный YDL без format для поиска
+                            search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
+                            if "cookiefile" in ydl_opts:
+                                search_opts["cookiefile"] = ydl_opts["cookiefile"]
+                            search_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                            with yt_dlp.YoutubeDL(search_opts) as ydl_search:
+                                try:
+                                    search = ydl_search.extract_info(f"ytsearch5:{query}", download=False)
+                                except Exception as e_search:
+                                    last_err = e_search
                                     continue
-                                # entries из ytsearch уже содержат formats/url — проверяем
-                                if entry.get("formats") or entry.get("url"):
-                                    # если формат не подошёл — попробуем детальную загрузку
+                                entries = search.get("entries") or []
+                                for entry in entries:
+                                    if not entry:
+                                        continue
+                                    vid = entry.get("id")
+                                    url = entry.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None) or entry.get("url")
+                                    if not url:
+                                        continue
+                                    # пробуем детально уже с текущим fmt
                                     try:
-                                        # пробуем детально по webpage_url чтобы проверить форматы
-                                        detail_url = entry.get("webpage_url") or entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                                        if detail_url and detail_url.startswith("http"):
-                                            detail = ydl.extract_info(detail_url, download=False)
-                                            if detail and (detail.get("url") or detail.get("formats")):
-                                                return detail
+                                        detail = ydl.extract_info(url, download=False)
+                                        if detail and (detail.get("url") or detail.get("formats")):
+                                            return detail
                                     except Exception as e2:
                                         last_err = e2
-                                        if "Requested format is not available" in str(e2):
-                                            continue
-                                    return entry
-                            # если ни одна entry не подошла
-                            if entries:
-                                return entries[0]
-                            last_err = Exception("No search results")
+                                        if "Requested format is not available" in str(e2) or "format is not available" in str(e2).lower():
+                                            continue  # пробуем следующую entry с тем же форматом
+                                        # иначе пробуем следующую entry
+                                        continue
+                                if entries:
+                                    # фолбэк — вернем первую entry если детали не вышло (пусть URL пикер попробует)
+                                    return entries[0]
                             continue
                 except Exception as e:
                     last_err = e
