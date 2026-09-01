@@ -423,27 +423,45 @@ async def _music_enqueue(msg: discord.Message, query: str):
                                     last_err = e_search
                                     continue
                                 entries = search.get("entries") or []
-                                for entry in entries:
+                                # фильтр музыки: отсеиваем болтовню типа "ВЕРНУЛИСЬ! НЕУЖЕЛИ 2 СЕЗОН" — ищем OST/music
+                                def _is_music(e):
+                                    t = (e.get("title") or "").lower()
+                                    # если в title есть музыкальные маркеры — точно музыка
+                                    music_kw = ["ost", "music", "song", "soundtrack", "audio", "official", "mv", "m/v", "amv", "nightcore", "cover", "remix", "phonk", "trap", "lofi", "instrumental", "theme", "opening", "ending"]
+                                    if any(k in t for k in music_kw):
+                                        return True
+                                    # для запроса с "дрон" — требуем ost/music в title, иначе это болтовня
+                                    ql = query.lower()
+                                    if "дрон" in ql or "murder" in ql:
+                                        return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"])
+                                    if "грустн" in ql or "atmospheric" in ql or "sad" in ql:
+                                        return True  # грустное — любое пойдет, но лучше с music
+                                    return True  # по умолчанию пропускаем, но сортируем
+                                # сортируем: музыкальные сначала
+                                entries_sorted = sorted(entries, key=lambda e: 0 if _is_music(e) else 1)
+                                for entry in entries_sorted:
                                     if not entry:
                                         continue
                                     vid = entry.get("id")
                                     url = entry.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None) or entry.get("url")
                                     if not url:
                                         continue
-                                    # пробуем детально уже с текущим fmt
                                     try:
                                         detail = ydl.extract_info(url, download=False)
                                         if detail and (detail.get("url") or detail.get("formats")):
+                                            # доп проверка: если это не музыка а болтовня — скипаем
+                                            dt = (detail.get("title") or entry.get("title") or "").lower()
+                                            if ("вернулись" in dt and "сезон" in dt and "murder drones" in dt and "ost" not in dt and "music" not in dt):
+                                                last_err = Exception(f"skip non-music: {dt[:60]}")
+                                                continue
                                             return detail
                                     except Exception as e2:
                                         last_err = e2
                                         if "Requested format is not available" in str(e2) or "format is not available" in str(e2).lower():
-                                            continue  # пробуем следующую entry с тем же форматом
-                                        # иначе пробуем следующую entry
+                                            continue
                                         continue
-                                if entries:
-                                    # фолбэк — вернем первую entry если детали не вышло (пусть URL пикер попробует)
-                                    return entries[0]
+                                if entries_sorted:
+                                    return entries_sorted[0]
                             continue
                 except Exception as e:
                     last_err = e
@@ -576,8 +594,8 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
     if _start_any(names, "очередь", "что играет", "что сейчас играет"):
         await message.reply((lambda: (lambda q,now: (f"▶️ Сейчас: **{now['title']}**\n" if now else "") + ("\n".join([f"{i}. {it['title']}" for i,it in enumerate(list(q)[:10],1)]) if q else "Очередь пуста.")))(_music_queues[message.guild.id], _now_playing.get(message.guild.id)) or "Тихо...", mention_author=False)
         return True
-    # громкость / бассы — явные
-    if _start_any(names, "убавь", "тише", "потише", "убавь громкость", "сделай потише", "убавь звук"):
+    # громкость/басы — умные, понимают "еще прибавь", "добавь бассов" и т.д.
+    if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["убавь", "тише", "потише", "убавь громкость", "убавь звук"]):
         if _voice_denied():
             await message.reply("🚫 Зайди в мой войс чтобы менять громкость!", mention_author=False)
             return True
@@ -591,7 +609,7 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             except: pass
         await message.reply(f"🔉 Убавила → {int(new*100)}% (0-200%)", mention_author=False)
         return True
-    if _start_any(names, "прибавь", "громче", "погромче", "увеличь громкость", "прибавь громкость", "сделай громче", "прибавь звук", "погромче сделай"):
+    if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["прибавь", "громче", "погромче", "громкость", "прибавь звук"]):
         if _voice_denied():
             await message.reply("🚫 Зайди в мой войс чтобы менять громкость!", mention_author=False)
             return True
@@ -605,20 +623,21 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             except: pass
         await message.reply(f"🔊 Прибавила → {int(new*100)}% 💜", mention_author=False)
         return True
-    if _start_any(names, "добавь бассы", "бассы", "бас буст", "бас-буст", "включи бассы", "бас", "хочу басов"):
-        if _voice_denied():
-            await message.reply("🚫 Только в войсе можно крутить басы!", mention_author=False)
+    if any(low_clean.startswith(n) for n in names) and "бас" in low_clean:
+        if any(w in low_clean for w in ["убери", "выключи", "без", "выкл", "убрать"]):
+            if _voice_denied():
+                await message.reply("🚫 Зайди в войс!", mention_author=False)
+                return True
+            _music_bass[message.guild.id] = False
+            await message.reply("🎚️ Бассы убрала, чисто 🎧", mention_author=False)
             return True
-        _music_bass[message.guild.id] = True
-        await message.reply("🎚️ Бассы врубила 💥 — следующий трек жахнет, текущий перезапущу с басом", mention_author=False)
-        return True
-    if _start_any(names, "убери бассы", "выключи бассы", "без басов", "убери бас", "выкл басы"):
-        if _voice_denied():
-            await message.reply("🚫 Зайди в войс!", mention_author=False)
+        else:
+            if _voice_denied():
+                await message.reply("🚫 Только в войсе можно крутить басы!", mention_author=False)
+                return True
+            _music_bass[message.guild.id] = True
+            await message.reply("🎚️ Бассы врубила 💥 — следующий трек жахнет", mention_author=False)
             return True
-        _music_bass[message.guild.id] = False
-        await message.reply("🎚️ Бассы убрала, чисто 🎧", mention_author=False)
-        return True
     # === AI-нейронка для понимания контекста (если не сработал готовый шаблон) ===
     # Понимает "выключи", "поставь на паузу", "включи Ost drone" и т.д. через Muse Spark
     if any(low_clean.startswith(n) for n in names):
@@ -635,10 +654,10 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             if not api_key or "opencode.ai" not in base_url:
                 return False
             import aiohttp
-            # универсальный классификатор всех музыкальных интентов — понимает контекст, настроение, громкость и басы
+            # универсальный классификатор — понимает контекст, настроение, опечатки и различает чат vs музыка, ищет только музыку
             payload = {
                 "model": "muse-spark-1.2-contributor-free",
-                "instructions": "Ты классификатор для музыкального бота Узи. Пользователь пишет 'Узи <текст>'. Определи intent: PLAY (включить трек), STOP (выключить), PAUSE (пауза), RESUME (продолжи), SKIP (скип/дальше/next), QUEUE (очередь), JOIN (зайди), LEAVE (выйди), VOLUME_UP (прибавь/громче), VOLUME_DOWN (убавь/тише), BASS_ON (добавь бассы/бас буст), BASS_OFF (убери бассы), или NO (обычный чат). Если PLAY — верни ОПТИМАЛЬНЫЙ поисковый запрос для YouTube (2-5 слов): переводи русские описания/настроение/лор в названия. Примеры: 'выключи' -> STOP, 'пауза' -> PAUSE, 'скипни' -> SKIP, 'убавь' -> VOLUME_DOWN, 'тише' -> VOLUME_DOWN, 'прибавь' -> VOLUME_UP, 'громче' -> VOLUME_UP, 'добавь бассы' -> BASS_ON, 'убери бассы' -> BASS_OFF, 'как дела?' -> NO, 'включи Ost drone' -> Ost drone, 'включи дронов убийц' -> Murder Drones OST, 'включи дроны убийцы форевер' -> Murder Drones Forever OST, 'включи что-то под грустную атмосферу' -> sad atmospheric music, 'вруби грустный фонк' -> sad phonk",
+                "instructions": "Ты классификатор для музыкального бота Узи. Пользователь пишет 'Узи <текст>'. Определи intent: PLAY (включить МУЗЫКУ, верни ОПТИМАЛЬНЫЙ YouTube запрос 2-5 слов с упором на музыку), STOP, PAUSE, RESUME, SKIP, QUEUE, JOIN, LEAVE, VOLUME_UP, VOLUME_DOWN, BASS_ON, BASS_OFF, REMOVE (убери трек из очереди), или NO (чат). Для PLAY всегда добавляй музыкальный маркер: OST/music/song/cover чтобы не попалась болтовня. Исправляй опечатки 'что та'->'что-то'. Примеры: 'включи что та из дронов убийц' -> Murder Drones OST music, 'включи что та грустное' -> sad atmospheric music, 'включи дронов убийц форевер' -> Murder Drones Forever OST music, 'дронов убийц' -> Murder Drones OST music, 'убери трек из очереди' -> REMOVE, 'добавь бассов'->BASS_ON, 'еще прибавь'->VOLUME_UP, 'выключи'->STOP, 'как дела?'->NO. ВАЖНО: 'Убийцы вернулись! Неужели 2 сезон' это НЕ музыка — не возвращай такое, только OST/music.",
                 "input": query,
                 "temperature": 0.4,
                 "max_output_tokens": 60
@@ -767,6 +786,30 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                             return True
                         _music_bass[message.guild.id] = False
                         await message.reply("🎚️ Бассы убрала", mention_author=False)
+                        return True
+                    if up == "REMOVE":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Только в войсе можно удалять!", mention_author=False)
+                            return True
+                        q = _music_queues[message.guild.id]
+                        if not q:
+                            await message.reply("Очередь пуста — нечего убирать", mention_author=False)
+                        else:
+                            import re as _re
+                            m = _re.search(r"\d+", query)
+                            if m:
+                                idx = int(m.group(0)) - 1
+                                ql = list(q)
+                                if 0 <= idx < len(ql):
+                                    removed = ql.pop(idx)
+                                    _music_queues[message.guild.id] = deque(ql, maxlen=_cfg("AI_MAX_HISTORY", 25)*2)
+                                    await message.reply(f"🗑️ Убрала: **{removed['title']}**", mention_author=False)
+                                else:
+                                    removed = q.pop()
+                                    await message.reply(f"🗑️ Убрала последний: **{removed['title']}**", mention_author=False)
+                            else:
+                                removed = q.pop()
+                                await message.reply(f"🗑️ Убрала: **{removed['title']}**", mention_author=False)
                         return True
                     # иначе считаем PLAY — остаток это запрос для поиска
                     if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
