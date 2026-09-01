@@ -289,11 +289,13 @@ async def _music_enqueue(msg: discord.Message, query: str):
     except ImportError:
         await msg.reply("❌ yt-dlp не установлен на хосте. Добавь в requirements и пересобери.", mention_author=False)
         return
-    # YouTube с Railway IP просит куки — обходим android-клиентом и без hls, + можно задать YT_COOKIES в Variables
-    ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "extractor_args": {"youtube": {"player_client": ["android","web"], "skip": ["hls","dash"]}}, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
-    # если есть cookies в env — используем
+    # YouTube с Railway IP просит куки — пробуем несколько клиентов, + YT_COOKIES если есть
+    base_ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
+    # готовим набор клиентов для обхода (android обходит Sign in)
+    client_sets = [["android","web"], ["android_music","android"], ["ios","android","web"], ["web"]]
     import tempfile
     cookies_data = os.getenv("YT_COOKIES", "")
+    ydl_opts = base_ydl_opts.copy()
     if cookies_data and "netscape" in cookies_data.lower():
         try:
             tf = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
@@ -302,16 +304,30 @@ async def _music_enqueue(msg: discord.Message, query: str):
             ydl_opts["cookiefile"] = tf.name
         except:
             pass
+        client_sets = [["web"]]  # с куками web лучше
     loop = asyncio.get_event_loop()
     def _extract():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # если это не ссылка — ищем на ютубе
-            if query.startswith("http"):
-                info = ydl.extract_info(query, download=False)
-            else:
-                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                if "entries" in info:
-                    info = info["entries"][0] if info["entries"] else None
+        last_err = None
+        for clients in client_sets:
+            opts = ydl_opts.copy()
+            opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    if query.startswith("http"):
+                        info = ydl.extract_info(query, download=False)
+                    else:
+                        info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+                        if "entries" in info:
+                            info = info["entries"][0] if info["entries"] else None
+                    return info
+            except Exception as e:
+                last_err = e
+                if "Sign in" in str(e) or "cookies" in str(e).lower():
+                    continue
+                raise
+        if last_err:
+            raise last_err
+        return None
             return info
     try:
         info = await loop.run_in_executor(None, _extract)
