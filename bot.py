@@ -289,7 +289,19 @@ async def _music_enqueue(msg: discord.Message, query: str):
     except ImportError:
         await msg.reply("❌ yt-dlp не установлен на хосте. Добавь в requirements и пересобери.", mention_author=False)
         return
-    ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
+    # YouTube с Railway IP просит куки — обходим android-клиентом и без hls, + можно задать YT_COOKIES в Variables
+    ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "extractor_args": {"youtube": {"player_client": ["android","web"], "skip": ["hls","dash"]}}, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
+    # если есть cookies в env — используем
+    import tempfile
+    cookies_data = os.getenv("YT_COOKIES", "")
+    if cookies_data and "netscape" in cookies_data.lower():
+        try:
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
+            tf.write(cookies_data)
+            tf.close()
+            ydl_opts["cookiefile"] = tf.name
+        except:
+            pass
     loop = asyncio.get_event_loop()
     def _extract():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
