@@ -339,6 +339,8 @@ async def _music_enqueue(msg: discord.Message, query: str):
     base_ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
     # готовим набор клиентов для обхода (android обходит Sign in)
     client_sets = [["android","web"], ["android_music","android"], ["ios","android","web"], ["web"]]
+    # фолбэк форматы если "Requested format is not available"
+    format_tries = ["bestaudio/best", "bestaudio", "best", "bv*+ba/b", None]
     import tempfile
     cookies_data = os.getenv("YT_COOKIES", "")
     ydl_opts = base_ydl_opts.copy()
@@ -355,22 +357,30 @@ async def _music_enqueue(msg: discord.Message, query: str):
     def _extract():
         last_err = None
         for clients in client_sets:
-            opts = ydl_opts.copy()
-            opts["extractor_args"] = {"youtube": {"player_client": clients}}
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    if query.startswith("http"):
-                        info = ydl.extract_info(query, download=False)
-                    else:
-                        info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                        if "entries" in info:
-                            info = info["entries"][0] if info["entries"] else None
-                    return info
-            except Exception as e:
-                last_err = e
-                if "Sign in" in str(e) or "cookies" in str(e).lower():
-                    continue
-                raise
+            for fmt in format_tries:
+                opts = ydl_opts.copy()
+                opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                if fmt is None:
+                    opts.pop("format", None)
+                else:
+                    opts["format"] = fmt
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        if query.startswith("http"):
+                            info = ydl.extract_info(query, download=False)
+                        else:
+                            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+                            if "entries" in info:
+                                info = info["entries"][0] if info["entries"] else None
+                        return info
+                except Exception as e:
+                    last_err = e
+                    msg = str(e)
+                    if "Sign in" in msg or "cookies" in msg.lower():
+                        break  # пробуем следующий client_set, не форматы
+                    if "Requested format is not available" in msg or "format is not available" in msg.lower():
+                        continue  # пробуем следующий формат
+                    raise
         if last_err:
             raise last_err
         return None
@@ -382,11 +392,22 @@ async def _music_enqueue(msg: discord.Message, query: str):
     if not info:
         await msg.reply("❌ Ничего не нашла по запросу.", mention_author=False)
         return
-    # прямой аудио url
+    # прямой аудио url — если yt-dlp не смог выбрать формат, выбираем лучший аудио вручную
     url = info.get("url") or info.get("entries", [{}])[0].get("url")
-    # для некоторых экстракторов url в formats
     if not url and info.get("formats"):
-        url = info["formats"][-1].get("url")
+        fmts = [f for f in info["formats"] if f.get("url")]
+        # предпочитаем аудио
+        audio = [f for f in fmts if f.get("acodec") != "none"]
+        pick = None
+        if audio:
+            # лучший по abr/tbr
+            try:
+                pick = max(audio, key=lambda f: (f.get("abr") or f.get("tbr") or 0))
+            except:
+                pick = audio[-1]
+        else:
+            pick = fmts[-1] if fmts else None
+        url = pick.get("url") if pick else None
     if not url:
         # пробуем взять webpage fallback
         url = info.get("webpage_url") or query
