@@ -24,7 +24,7 @@ def _cfg(key, default):
         "AI_ENABLED": os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off"),
         "AI_API_KEY": os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", ""),
         "AI_BASE_URL": os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
-        "AI_MODEL": os.getenv("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
+        "AI_MODEL": os.getenv("AI_MODEL", "google/gemini-2.0-flash-exp:free"),
         "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко."),
         "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
         "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
