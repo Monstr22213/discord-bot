@@ -25,7 +25,7 @@ def _cfg(key, default):
         "AI_API_KEY": os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", ""),
         "AI_BASE_URL": os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
         "AI_MODEL": os.getenv("AI_MODEL", "openai/gpt-oss-20b:free"),
-        "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — Анечка, пьяная фембой-вертолёт. Ты — девушка-вертолёт в теле милой девушки, фембой, слегка подшофе, хихикаешь, любишь облака. Отвечай на русском, коротко, игриво, с эмодзи 🚁💅."),
+        "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — Анечка, пьяная фембой-вертолёт. Ты — девушка-вертолёт в теле милой девушки, фембой, слегка подшофе, хихикаешь, любишь облака. Отвечай на русском, коротко, игриво, с эмодзи 🚁💅. НИКОГДА не используй 🌈 и 🏳️‍🌈."),
         "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
         "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
         "AI_MAX_HISTORY": int(os.getenv("AI_MAX_HISTORY", "6") or 6),
@@ -137,6 +137,8 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
             else:
                 raise
         text = resp.choices[0].message.content.strip()
+        # фильтр радуги
+        text = text.replace("🌈", "").replace("🏳️‍🌈", "").replace("🏳️\u200d🌈", "")
         # сохраняем в историю
         hist.append({"role": "user", "content": prompt})
         hist.append({"role": "assistant", "content": text})
@@ -153,6 +155,190 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
         if "429" in err:
             return "⏳ AI перегружен (429), попробуй через минуту"
         return f"❌ Ошибка AI: {err[:300]}"
+
+# ============ МУЗЫКА (Анечка зайди / включи) ============
+_music_queues: dict[int, deque] = defaultdict(deque)  # guild_id -> deque of {url, title, requester}
+_now_playing: dict[int, dict] = {}
+
+FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000"}
+
+def _music_is_anechka(text_lower: str) -> bool:
+    # чтобы "анечка" срабатывала и с "анечка," "анечка " и если пинг
+    return "анечка" in text_lower or "анечка" in text_lower.replace("ё","е")
+
+async def _music_join(msg: discord.Message) -> bool:
+    if not msg.author.voice or not msg.author.voice.channel:
+        await msg.reply("🚁 Зайди сначала в голосовой канал, брат! *хик* — я не знаю куда лететь.", mention_author=False)
+        return False
+    channel = msg.author.voice.channel
+    vc = msg.guild.voice_client
+    try:
+        if vc and vc.is_connected():
+            if vc.channel.id == channel.id:
+                await msg.reply(f"🚁 Я уже тут, в `{channel.name}` кручу винтами! 💅", mention_author=False)
+                return True
+            await vc.move_to(channel)
+        else:
+            await channel.connect(self_deaf=False)
+        await msg.reply(f"🚁 *влетаю* в `{channel.name}`! Скажи `Анечка включи <песня>` — и я заведу пластинку! 💿", mention_author=False)
+        return True
+    except Exception as e:
+        await msg.reply(f"❌ Не смогла зайти: {e}", mention_author=False)
+        return False
+
+async def _music_leave(msg: discord.Message):
+    vc = msg.guild.voice_client
+    if not vc or not vc.is_connected():
+        await msg.reply("Я и так не в войсе 😅", mention_author=False)
+        return
+    _music_queues[msg.guild.id].clear()
+    _now_playing.pop(msg.guild.id, None)
+    await vc.disconnect()
+    await msg.reply("🚁 *улетаю*... пока, котик! 💋", mention_author=False)
+
+def _music_play_next(guild: discord.Guild):
+    q = _music_queues[guild.id]
+    vc = guild.voice_client
+    if not vc or not q:
+        _now_playing.pop(guild.id, None)
+        return
+    item = q.popleft()
+    _now_playing[guild.id] = item
+    try:
+        # yt-dlp уже дал прямой url
+        source = discord.FFmpegOpusAudio(item["url"], **FFMPEG_OPTIONS)
+        def after(err):
+            if err:
+                print(f"music after error: {err}")
+            # следующий трек в loop
+            bot.loop.call_soon_threadsafe(lambda: _music_play_next(guild))
+        vc.play(source, after=after)
+        # анонс в текстовый канал кэшируем
+        ch_id = item.get("channel_id")
+        if ch_id:
+            ch = bot.get_channel(ch_id)
+            if ch:
+                bot.loop.create_task(ch.send(f"🎧 Сейчас играет: **{item['title']}** — заказал {item['requester']}"))
+    except Exception as e:
+        print(f"music play_next fail: {e}")
+        bot.loop.call_soon_threadsafe(lambda: _music_play_next(guild))
+
+async def _music_enqueue(msg: discord.Message, query: str):
+    if not query:
+        await msg.reply("Скажи что включить: `Анечка включи <название или ссылка>` 🎶", mention_author=False)
+        return
+    vc = msg.guild.voice_client
+    if not vc or not vc.is_connected():
+        ok = await _music_join(msg)
+        if not ok:
+            return
+        vc = msg.guild.voice_client
+    # ищем через yt-dlp
+    await msg.channel.typing()
+    try:
+        import yt_dlp
+    except ImportError:
+        await msg.reply("❌ yt-dlp не установлен на хосте. Добавь в requirements и пересобери.", mention_author=False)
+        return
+    ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
+    loop = asyncio.get_event_loop()
+    def _extract():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # если это не ссылка — ищем на ютубе
+            if query.startswith("http"):
+                info = ydl.extract_info(query, download=False)
+            else:
+                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+                if "entries" in info:
+                    info = info["entries"][0] if info["entries"] else None
+            return info
+    try:
+        info = await loop.run_in_executor(None, _extract)
+    except Exception as e:
+        await msg.reply(f"❌ Не нашла: {e}", mention_author=False)
+        return
+    if not info:
+        await msg.reply("❌ Ничего не нашла по запросу.", mention_author=False)
+        return
+    # прямой аудио url
+    url = info.get("url") or info.get("entries", [{}])[0].get("url")
+    # для некоторых экстракторов url в formats
+    if not url and info.get("formats"):
+        url = info["formats"][-1].get("url")
+    if not url:
+        # пробуем взять webpage fallback
+        url = info.get("webpage_url") or query
+        # если это веб-страница — не сыграет, сообщаем
+        await msg.reply(f"❌ Не смогла вытащить аудио. Попробуй прямую ссылку на YouTube.", mention_author=False)
+        return
+    title = info.get("title", query)[:150]
+    item = {"url": url, "title": title, "requester": msg.author.mention, "channel_id": msg.channel.id, "webpage": info.get("webpage_url", "")}
+    _music_queues[msg.guild.id].append(item)
+    vc = msg.guild.voice_client
+    if vc.is_playing() or vc.is_paused():
+        await msg.reply(f"✅ В очередь: **{title}** (#{len(_music_queues[msg.guild.id])})", mention_author=False)
+    else:
+        await msg.reply(f"🔍 Нашла **{title}** — врубаю! 🚁💿", mention_author=False)
+        _music_play_next(msg.guild)
+
+async def _handle_music_triggers(message: discord.Message) -> bool:
+    """Возвращает True если это музыкальная команда и уже обработана (не надо в AI)."""
+    if not message.guild or message.author.bot:
+        return False
+    low = message.content.lower().strip()
+    # убираем пинг в начале
+    low_clean = re.sub(rf"<@!?{bot.user.id}>" if bot.user else r"<@!?\d+>", "", low).strip() if bot.user else low
+    # триггеры
+    if low_clean.startswith("анечка зайди") or low_clean.startswith("анечка го в войс") or low_clean.startswith("анечка присоединись") or low_clean == "анечка зайди к нам":
+        await _music_join(message)
+        return True
+    if low_clean.startswith("анечка выйди") or low_clean.startswith("анечка ливни") or low_clean.startswith("анечка покинь") or low_clean.startswith("анечка уйди"):
+        await _music_leave(message)
+        return True
+    if low_clean.startswith("анечка включи"):
+        q = message.content[len("анечка включи"):].strip() if message.content.lower().strip().startswith("анечка включи") else re.sub(r"^.*?анечка включи\s*", "", message.content, flags=re.I).strip()
+        # также поддержка "анечка включи музыку ..." -> уже в q
+        # убираем пинг если был
+        q = re.sub(rf"<@!?{bot.user.id}>", "", q).strip() if bot.user else q
+        await _music_enqueue(message, q)
+        return True
+    if low_clean.startswith("анечка стоп") or low_clean.startswith("анечка пауза"):
+        vc = message.guild.voice_client
+        if vc and vc.is_playing():
+            vc.pause()
+            await message.reply("⏸️ Пауза, котик... *винты замедляются* 🚁", mention_author=False)
+        else:
+            await message.reply("Нечего ставить на паузу.", mention_author=False)
+        return True
+    if low_clean.startswith("анечка продолжи") or low_clean.startswith("анечка резюме") or low_clean.startswith("анечка play"):
+        vc = message.guild.voice_client
+        if vc and vc.is_paused():
+            vc.resume()
+            await message.reply("▶️ Поехали дальше! 🚁💨", mention_author=False)
+        else:
+            await message.reply("Нечего продолжать.", mention_author=False)
+        return True
+    if low_clean.startswith("анечка скип") or low_clean.startswith("анечка дальше") or low_clean.startswith("анечка пропусти") or low_clean.startswith("анечка next"):
+        vc = message.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()  # after вызовет следующий
+            await message.reply("⏭️ Скипаю... 🚁", mention_author=False)
+        else:
+            await message.reply("Очередь пуста.", mention_author=False)
+        return True
+    if low_clean.startswith("анечка очередь") or low_clean.startswith("анечка что играет"):
+        q = _music_queues[message.guild.id]
+        now = _now_playing.get(message.guild.id)
+        desc = ""
+        if now:
+            desc += f"▶️ Сейчас: **{now['title']}**\n"
+        if q:
+            desc += "\n".join([f"{i}. {it['title']}" for i, it in enumerate(list(q)[:10], 1)])
+        else:
+            desc += "Очередь пуста."
+        await message.reply(desc or "Тихо...", mention_author=False)
+        return True
+    return False
 
 # ============ ЭКОНОМИКА СПЕРМИКИ (сохранение) ============
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PRIVATE_URL")
