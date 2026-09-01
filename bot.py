@@ -119,52 +119,91 @@ def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
     return False, ""
 
 async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int = 0, guild_name: str = "") -> str:
-    client = _get_ai_client()
-    if not client:
-        return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` в Variables на Railway (https://openrouter.ai/keys)"
+    api_key = _cfg("AI_API_KEY", "")
+    base_url = _cfg("AI_BASE_URL", "https://opencode.ai/zen/v1/responses")
+    model = _cfg("AI_MODEL", "muse-spark-1.2-contributor-free")
+    if not api_key:
+        return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` или `OPENCODE_API_KEY` в Variables на Railway"
     # история канала
     hist = _ai_history[channel_id]
-    # обогащаем system prompt контекстом: кто пишет
     base_prompt = _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")
     ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Сейчас пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Формат 'Автор: текст' — АВТОР кто написал, @упоминания — ДРУГИЕ. Пример: 'Serial Designation V: Узи, @hanacoamilla сказал...' — автор V, hanacoamilla — третий. Лор: 'N' — добрый краш, мягко-цундере; 'V/Vi' — дерзкая подруга, на равных; 'J' — враждебно; 'Syn' — НЕНАВИДИШЬ (пыталась убить N) 'Syn, тронешь N — разнесу!'; 'Yeva/Йева' — подруга, тепло-дружелюбно 'о, Yeva, привет!'; Khan — бурчи; остальные типа hanacoamilla — обычные воркеры, нейтрально-язвительно. Обращайся по имени автора.]"
-    messages = [{"role": "system", "content": base_prompt + ctx}]
-    for m in hist:
-        messages.append(m)
-    messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
-
+    # если это opencode zen — используем Responses API как в sv_lotm_ai.lua
+    is_opencode = "opencode.ai" in base_url
     try:
-        model = _cfg("AI_MODEL", "opencode/muse-spark-1.2-contributor-free")
-        # таймаут 25с чтобы не висло "Bot думает..."
-        async def _call(m):
-            return await client.chat.completions.create(model=m, messages=messages, max_tokens=800, temperature=0.8, timeout=25)
-        try:
-            resp = await asyncio.wait_for(_call(model), timeout=30)
-        except Exception as e1:
-            # если модель недоступна (404) — пробуем другие free
-            if "404" in str(e1) and model != "opencode/muse-spark-1.2-contributor-free":
-                print(f"AI model {model} 404, retry opencode/muse-spark-1.2-contributor-free")
-                resp = await asyncio.wait_for(_call("opencode/muse-spark-1.2-contributor-free"), timeout=30)
-            else:
-                raise
-        text = resp.choices[0].message.content.strip()
+        if is_opencode:
+            # собираем input как в LotM: история + текущий вопрос
+            hist_text = "\n".join([f"{m['role']}: {m['content']}" for m in hist]) if hist else ""
+            full_input = (hist_text + "\n" if hist_text else "") + f"{author_name}: {prompt}"
+            # если есть ctx — добавляем через instructions
+            instructions = base_prompt + ctx
+            import aiohttp
+            payload = {
+                "model": model if "/" not in model else model.split("/")[-1] if model.startswith("opencode/") else model,
+                "instructions": instructions,
+                "input": full_input,
+                "temperature": 0.9,
+                "max_output_tokens": 800,
+                "reasoning": {"effort": "low"}
+            }
+            # opencode ожидает чистый ID без префикса opencode/
+            if payload["model"].startswith("muse-spark"):
+                payload["model"] = "muse-spark-1.2-contributor-free"
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(base_url, json=payload, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "HTTP-Referer": "https://discord-bot.local", "X-Title": "Discord Uzi Bot"}, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    txt = await r.text()
+                    if r.status != 200:
+                        raise Exception(f"HTTP {r.status}: {txt[:400]}")
+                    import json as _json
+                    data = _json.loads(txt)
+                    # парсим как в lua: output[0].content[0].text или choices
+                    ans = None
+                    if data.get("choices") and data["choices"][0].get("message"):
+                        ans = data["choices"][0]["message"]["content"]
+                    elif data.get("output"):
+                        for out in data["output"]:
+                            if out.get("content"):
+                                for c in out["content"]:
+                                    if c.get("text"):
+                                        ans = c["text"]
+                                        break
+                            if ans: break
+                    ans = ans or data.get("output_text") or data.get("text") or data.get("response") or ""
+                    text = str(ans).strip() or "Туман молчит..."
+        else:
+            client = _get_ai_client()
+            if not client:
+                return "❌ AI не настроен (нет клиента)"
+            messages = [{"role": "system", "content": base_prompt + ctx}]
+            for m in hist:
+                messages.append(m)
+            messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
+            async def _call(m):
+                return await client.chat.completions.create(model=m, messages=messages, max_tokens=800, temperature=0.8, timeout=25)
+            try:
+                resp = await asyncio.wait_for(_call(model), timeout=30)
+            except Exception as e1:
+                if "404" in str(e1) and model != "muse-spark-1.2-contributor-free":
+                    print(f"AI model {model} 404, retry muse-spark-1.2-contributor-free")
+                    resp = await asyncio.wait_for(_call("muse-spark-1.2-contributor-free"), timeout=30)
+                else:
+                    raise
+            text = resp.choices[0].message.content.strip()
         # фильтр радуги
         text = text.replace("🌈", "").replace("🏳️‍🌈", "").replace("🏳️\u200d🌈", "")
-        # сохраняем в историю с именем чтобы помнить кто есть кто
         hist.append({"role": "user", "content": f"{author_name}: {prompt}"})
         hist.append({"role": "assistant", "content": text})
-        # лимит Discord 2000
         if len(text) > 1900:
             text = text[:1900] + "…"
         return text
     except Exception as e:
         err = str(e)
         print(f"AI error: {err}")
-        # дружелюбное сообщение
         if "401" in err or "auth" in err.lower():
-            return "❌ Ошибка ключа OpenRouter — проверь OPENROUTER_API_KEY в .env"
+            return "❌ Ошибка ключа — проверь OPENCODE_API_KEY/OPENROUTER_API_KEY в Variables"
         if "429" in err:
             return "⏳ AI перегружен (429), попробуй через минуту"
-        return f"❌ Ошибка AI: {err[:300]}"
+        return f"❌ Ошибка AI: {err[:400]}"
 
 # ============ МУЗЫКА (Анечка зайди / включи) ============
 _music_queues: dict[int, deque] = defaultdict(deque)  # guild_id -> deque of {url, title, requester}

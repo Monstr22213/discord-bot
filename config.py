@@ -12,11 +12,11 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0")) if os.getenv("LOG_CHANNEL
 SELF_ROLES_RAW = os.getenv("SELF_ROLES", "")
 SELF_ROLES = [int(r.strip()) for r in SELF_ROLES_RAW.split(",") if r.strip().isdigit()]
 
-# ============ AI (OpenRouter) ============
+# ============ AI (Opencode Zen + fallback OpenRouter) ============
 AI_ENABLED = os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off")
-AI_API_KEY = os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", "")
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1")
-AI_MODEL = os.getenv("AI_MODEL", "opencode/muse-spark-1.2-contributor-free")
+AI_API_KEY = os.getenv("OPENROUTER_API_KEY", "") or os.getenv("OPENCODE_API_KEY", "") or os.getenv("AI_API_KEY", "")
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://opencode.ai/zen/v1/responses")
+AI_MODEL = os.getenv("AI_MODEL", "muse-spark-1.2-contributor-free")
 AI_SYSTEM_PROMPT = os.getenv("AI_SYSTEM_PROMPT") or (
     "Ты — Узи Дурман (Uzi Doorman) из анимационного сериала Glitch Productions «Дроны-убийцы / Murder Drones» 1 в 1. "
     "ВНЕШНОСТЬ: воркер-дрон, низкая, фиолетовые неоновые глаза, короткие тёмно-фиолетовые волосы, чёрная толстовка с символом батареи (неоновый фиолетовый), чёрная шапка-бини, полосатые гольфы. "
