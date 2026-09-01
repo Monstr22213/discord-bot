@@ -254,8 +254,20 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
 # ============ МУЗЫКА (Анечка зайди / включи) ============
 _music_queues: dict[int, deque] = defaultdict(deque)  # guild_id -> deque of {url, title, requester}
 _now_playing: dict[int, dict] = {}
+_music_volume: dict[int, float] = defaultdict(lambda: 0.5)  # guild_id -> 0.0-2.0 (50% по дефолту)
+_music_bass: dict[int, bool] = defaultdict(bool)  # guild_id -> bass boost вкл/выкл
 
 FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000"}
+FFMPEG_BASS_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000 -af bass=g=10:frequency=110:width=0.6,volume=1.2"}
+
+def _check_voice_permission(msg: discord.Message) -> bool:
+    """Проверка: автор в том же войсе что и бот. Если нет — возвращаем False (отправлять reply должен вызыватель)."""
+    vc = msg.guild.voice_client if msg.guild else None
+    if not vc or not vc.is_connected():
+        return False
+    if not msg.author.voice or not msg.author.voice.channel:
+        return False
+    return msg.author.voice.channel.id == vc.channel.id
 
 def _music_is_anechka(text_lower: str) -> bool:
     # чтобы "анечка" срабатывала и с "анечка," "анечка " и если пинг
@@ -302,8 +314,12 @@ def _music_play_next(guild: discord.Guild):
     item = q.popleft()
     _now_playing[guild.id] = item
     try:
-        # yt-dlp уже дал прямой url
-        source = discord.FFmpegOpusAudio(item["url"], **FFMPEG_OPTIONS)
+        # yt-dlp уже дал прямой url — оборачиваем в PCMVolumeTransformer для регулировки громкости, бас через ffmpeg
+        use_bass = _music_bass.get(guild.id, False)
+        opts = FFMPEG_BASS_OPTIONS if use_bass else FFMPEG_OPTIONS
+        base_source = discord.FFmpegOpusAudio(item["url"], **opts)
+        vol = _music_volume.get(guild.id, 0.5)
+        source = discord.PCMVolumeTransformer(base_source, volume=vol)
         def after(err):
             if err:
                 print(f"music after error: {err}")
@@ -454,11 +470,10 @@ async def _music_enqueue(msg: discord.Message, query: str):
         _music_play_next(msg.guild)
 
 async def _handle_music_triggers(message: discord.Message) -> bool:
-    """Возвращает True если это музыкальная команда и уже обработана (не надо в AI). Поддерживает Анечка/Узи/Uzi."""
+    """Возвращает True если это музыкальная команда и уже обработана (не надо в AI). Поддерживает Анечка/Узи/Uzi. Только те кто в войсе с ботом могут управлять."""
     if not message.guild or message.author.bot:
         return False
     low = message.content.lower().strip()
-    # убираем пинг в начале
     low_clean = re.sub(rf"<@!?{bot.user.id}>" if bot.user else r"<@!?\d+>", "", low).strip() if bot.user else low
     def _start_any(names, *suffixes):
         for n in names:
@@ -467,25 +482,38 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                     return True
         return False
     names = ["анечка", "узи", "uzi"]
-    # зайди
+    def _voice_denied():
+        vc = message.guild.voice_client if message.guild else None
+        if not vc or not vc.is_connected():
+            return False  # бота нет — разрешаем (зайди/включи сами проверят)
+        return not _check_voice_permission(message)
+    # зайди — без проверки same channel, но надо быть в любом войсе (проверит _music_join)
     if _start_any(names, "зайди", "зайди ко мне", "зайди к нам", "го в войс", "го к нам", "присоединись", "зайди в войс"):
-        await _music_join(message)
+        await _music_join(message, silent=True)
         return True
     if _start_any(names, "выйди", "ливни", "ливнуть", "ливать", "покинь", "уйди", "выйди из войса", "ливни из войса"):
+        if _voice_denied():
+            await message.reply("🚫 Только те кто в войсе со мной могут выгнать — зайди в мой канал!", mention_author=False)
+            return True
         await _music_leave(message)
         return True
     # умные музыкальные триггеры: "узи включи/поставь/добавь/запусти/в очередь/плей"
     if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["включи","поставь","добавь","запусти","очередь","плей","play"]):
+        if _voice_denied():
+            await message.reply("🚫 Только те кто в войсе со мной могут ставить музыку — зайди в мой канал!", mention_author=False)
+            return True
         q = re.sub(r"^(?:анечка|узи|uzi)\s+(?:включи|поставь(?:\s+в\s+очередь)?|добавь(?:\s+в\s+очередь)?|запусти|плей|play)\s*", "", message.content, flags=re.I).strip()
         q = re.sub(r"^(?:в\s+очередь\s*)", "", q, flags=re.I).strip()
         q = re.sub(rf"<@!?{bot.user.id}>", "", q).strip() if bot.user else q
         if q and len(q) > 2:
             await _music_enqueue(message, q)
             return True
-        # если запрос пустой но явно музыка — не кидаем в AI
         await _music_enqueue(message, q)
         return True
     if _start_any(names, "стоп", "пауза"):
+        if _voice_denied():
+            await message.reply("🚫 Зайди в мой войс чтобы ставить на паузу!", mention_author=False)
+            return True
         vc = message.guild.voice_client
         if vc and vc.is_playing():
             vc.pause()
@@ -494,6 +522,9 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             await message.reply("Нечего ставить на паузу.", mention_author=False)
         return True
     if _start_any(names, "продолжи", "резюме", "play"):
+        if _voice_denied():
+            await message.reply("🚫 Зайди в мой войс чтобы продолжить!", mention_author=False)
+            return True
         vc = message.guild.voice_client
         if vc and vc.is_paused():
             vc.resume()
@@ -502,24 +533,61 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             await message.reply("Нечего продолжать.", mention_author=False)
         return True
     if _start_any(names, "скип", "дальше", "пропусти", "next", "скипни"):
+        if _voice_denied():
+            await message.reply("🚫 Только в войсе можно скипать!", mention_author=False)
+            return True
         vc = message.guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()  # after вызовет следующий
+            vc.stop()
             await message.reply("⏭️ Скипаю... 🚁", mention_author=False)
         else:
             await message.reply("Очередь пуста.", mention_author=False)
         return True
     if _start_any(names, "очередь", "что играет", "что сейчас играет"):
-        q = _music_queues[message.guild.id]
-        now = _now_playing.get(message.guild.id)
-        desc = ""
-        if now:
-            desc += f"▶️ Сейчас: **{now['title']}**\n"
-        if q:
-            desc += "\n".join([f"{i}. {it['title']}" for i, it in enumerate(list(q)[:10], 1)])
-        else:
-            desc += "Очередь пуста."
-        await message.reply(desc or "Тихо...", mention_author=False)
+        await message.reply((lambda: (lambda q,now: (f"▶️ Сейчас: **{now['title']}**\n" if now else "") + ("\n".join([f"{i}. {it['title']}" for i,it in enumerate(list(q)[:10],1)]) if q else "Очередь пуста.")))(_music_queues[message.guild.id], _now_playing.get(message.guild.id)) or "Тихо...", mention_author=False)
+        return True
+    # громкость / бассы — явные
+    if _start_any(names, "убавь", "тише", "потише", "убавь громкость", "сделай потише", "убавь звук"):
+        if _voice_denied():
+            await message.reply("🚫 Зайди в мой войс чтобы менять громкость!", mention_author=False)
+            return True
+        gid = message.guild.id
+        cur = _music_volume.get(gid, 0.5)
+        new = max(0.0, cur - 0.15)
+        _music_volume[gid] = new
+        vc = message.guild.voice_client
+        if vc and vc.source and hasattr(vc.source, "volume"):
+            try: vc.source.volume = new
+            except: pass
+        await message.reply(f"🔉 Убавила → {int(new*100)}% (0-200%)", mention_author=False)
+        return True
+    if _start_any(names, "прибавь", "громче", "погромче", "увеличь громкость", "прибавь громкость", "сделай громче", "прибавь звук", "погромче сделай"):
+        if _voice_denied():
+            await message.reply("🚫 Зайди в мой войс чтобы менять громкость!", mention_author=False)
+            return True
+        gid = message.guild.id
+        cur = _music_volume.get(gid, 0.5)
+        new = min(2.0, cur + 0.15)
+        _music_volume[gid] = new
+        vc = message.guild.voice_client
+        if vc and vc.source and hasattr(vc.source, "volume"):
+            try: vc.source.volume = new
+            except: pass
+        await message.reply(f"🔊 Прибавила → {int(new*100)}% 💜", mention_author=False)
+        return True
+    if _start_any(names, "добавь бассы", "бассы", "бас буст", "бас-буст", "включи бассы", "бас", "хочу басов"):
+        if _voice_denied():
+            await message.reply("🚫 Только в войсе можно крутить басы!", mention_author=False)
+            return True
+        _music_bass[message.guild.id] = True
+        await message.reply("🎚️ Бассы врубила 💥 — следующий трек жахнет, текущий перезапущу с басом", mention_author=False)
+        return True
+    if _start_any(names, "убери бассы", "выключи бассы", "без басов", "убери бас", "выкл басы"):
+        if _voice_denied():
+            await message.reply("🚫 Зайди в войс!", mention_author=False)
+            return True
+        _music_bass[message.guild.id] = False
+        await message.reply("🎚️ Бассы убрала, чисто 🎧", mention_author=False)
         return True
     # === AI-нейронка для понимания контекста (если не сработал готовый шаблон) ===
     # Понимает "выключи", "поставь на паузу", "включи Ost drone" и т.д. через Muse Spark
@@ -537,12 +605,12 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             if not api_key or "opencode.ai" not in base_url:
                 return False
             import aiohttp
-            # универсальный классификатор всех музыкальных интентов
+            # универсальный классификатор всех музыкальных интентов — понимает контекст, настроение, громкость и басы
             payload = {
                 "model": "muse-spark-1.2-contributor-free",
-                "instructions": "Ты классификатор для музыкального бота Узи. Пользователь пишет 'Узи <текст>'. Определи intent: PLAY (включить/добавить трек), STOP (выключить/остановить музыку), PAUSE (пауза/поставь на паузу), RESUME (продолжи/возобнови), SKIP (скип/дальше/следующий/next/пропусти), QUEUE (очередь/что играет), JOIN (зайди/го в войс/присоединись), LEAVE (выйди/ливни/покинь), или NO (обычный чат, не музыка). Если PLAY — верни ТОЛЬКО название/ссылку для поиска. Если STOP/PAUSE/RESUME/SKIP/QUEUE/JOIN/LEAVE — верни ровно это слово. Если NO — верни NO. Примеры: 'выключи' -> STOP, 'выключи музыку' -> STOP, 'выруби нахуй' -> STOP, 'поставь на паузу' -> PAUSE, 'пауза' -> PAUSE, 'продолжи' -> RESUME, 'скипни трек' -> SKIP, 'дальше' -> SKIP, 'что играет' -> QUEUE, 'зайди ко мне' -> JOIN, 'выйди' -> LEAVE, 'включи Ost drone' -> Ost drone, 'вруби тучка тучка' -> тучка тучка, 'как дела?' -> NO, 'привет' -> NO",
+                "instructions": "Ты классификатор для музыкального бота Узи. Пользователь пишет 'Узи <текст>'. Определи intent: PLAY (включить трек), STOP (выключить), PAUSE (пауза), RESUME (продолжи), SKIP (скип/дальше/next), QUEUE (очередь), JOIN (зайди), LEAVE (выйди), VOLUME_UP (прибавь/громче), VOLUME_DOWN (убавь/тише), BASS_ON (добавь бассы/бас буст), BASS_OFF (убери бассы), или NO (обычный чат). Если PLAY — верни ОПТИМАЛЬНЫЙ поисковый запрос для YouTube (2-5 слов): переводи русские описания/настроение/лор в названия. Примеры: 'выключи' -> STOP, 'пауза' -> PAUSE, 'скипни' -> SKIP, 'убавь' -> VOLUME_DOWN, 'тише' -> VOLUME_DOWN, 'прибавь' -> VOLUME_UP, 'громче' -> VOLUME_UP, 'добавь бассы' -> BASS_ON, 'убери бассы' -> BASS_OFF, 'как дела?' -> NO, 'включи Ost drone' -> Ost drone, 'включи дронов убийц' -> Murder Drones OST, 'включи дроны убийцы форевер' -> Murder Drones Forever OST, 'включи что-то под грустную атмосферу' -> sad atmospheric music, 'вруби грустный фонк' -> sad phonk",
                 "input": query,
-                "temperature": 0.2,
+                "temperature": 0.4,
                 "max_output_tokens": 60
             }
             async with aiohttp.ClientSession() as sess:
@@ -563,8 +631,11 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                     if not ans or ans.upper() == "NO":
                         return False
                     up = ans.upper()
-                    # обрабатываем интенты
+                    # обрабатываем интенты — с проверкой что автор в том же войсе
                     if up == "STOP":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Только в войсе можно выключить!", mention_author=False)
+                            return True
                         vc = message.guild.voice_client
                         if vc and (vc.is_playing() or vc.is_paused()):
                             vc.stop()
@@ -575,6 +646,9 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                             await message.reply("Тихо уже, ничего не играет", mention_author=False)
                         return True
                     if up == "PAUSE":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Зайди в мой войс для паузы!", mention_author=False)
+                            return True
                         vc = message.guild.voice_client
                         if vc and vc.is_playing():
                             vc.pause()
@@ -583,6 +657,9 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                             await message.reply("Нечего ставить на паузу", mention_author=False)
                         return True
                     if up == "RESUME":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Зайди в войс!", mention_author=False)
+                            return True
                         vc = message.guild.voice_client
                         if vc and vc.is_paused():
                             vc.resume()
@@ -591,6 +668,9 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                             await message.reply("Нечего продолжать", mention_author=False)
                         return True
                     if up == "SKIP":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Только в войсе можно скипать!", mention_author=False)
+                            return True
                         vc = message.guild.voice_client
                         if vc and (vc.is_playing() or vc.is_paused()):
                             vc.stop()
@@ -611,9 +691,57 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                         await _music_join(message, silent=True)
                         return True
                     if up == "LEAVE":
+                        if not _check_voice_permission(message) and message.guild.voice_client and message.guild.voice_client.is_connected():
+                            await message.reply("🚫 Только в войсе можно выгнать!", mention_author=False)
+                            return True
                         await _music_leave(message)
                         return True
+                    if up == "VOLUME_DOWN":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Зайди в мой войс чтобы менять громкость!", mention_author=False)
+                            return True
+                        gid = message.guild.id
+                        cur = _music_volume.get(gid, 0.5)
+                        new = max(0.0, cur - 0.15)
+                        _music_volume[gid] = new
+                        vc = message.guild.voice_client
+                        if vc and vc.source and hasattr(vc.source, "volume"):
+                            try: vc.source.volume = new
+                            except: pass
+                        await message.reply(f"🔉 Убавила → {int(new*100)}%", mention_author=False)
+                        return True
+                    if up == "VOLUME_UP":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Зайди в войс чтобы прибавить!", mention_author=False)
+                            return True
+                        gid = message.guild.id
+                        cur = _music_volume.get(gid, 0.5)
+                        new = min(2.0, cur + 0.15)
+                        _music_volume[gid] = new
+                        vc = message.guild.voice_client
+                        if vc and vc.source and hasattr(vc.source, "volume"):
+                            try: vc.source.volume = new
+                            except: pass
+                        await message.reply(f"🔊 Прибавила → {int(new*100)}% 💜", mention_author=False)
+                        return True
+                    if up == "BASS_ON":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Только в войсе басы!", mention_author=False)
+                            return True
+                        _music_bass[message.guild.id] = True
+                        await message.reply("🎚️ Бассы врубила 💥 — следующий трек жахнет", mention_author=False)
+                        return True
+                    if up == "BASS_OFF":
+                        if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                            await message.reply("🚫 Зайди в войс!", mention_author=False)
+                            return True
+                        _music_bass[message.guild.id] = False
+                        await message.reply("🎚️ Бассы убрала", mention_author=False)
+                        return True
                     # иначе считаем PLAY — остаток это запрос для поиска
+                    if message.guild.voice_client and message.guild.voice_client.is_connected() and not _check_voice_permission(message):
+                        await message.reply("🚫 Только те кто в войсе со мной могут ставить музыку!", mention_author=False)
+                        return True
                     if len(ans) < 2 or len(ans) > 120:
                         if len(ans) > 120: ans = ans[:120]
                         if len(ans) < 2: return False
