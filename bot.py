@@ -261,7 +261,7 @@ def _music_is_anechka(text_lower: str) -> bool:
     # чтобы "анечка" срабатывала и с "анечка," "анечка " и если пинг
     return "анечка" in text_lower or "анечка" in text_lower.replace("ё","е")
 
-async def _music_join(msg: discord.Message) -> bool:
+async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
     if not msg.author.voice or not msg.author.voice.channel:
         await msg.reply("🚁 Зайди сначала в голосовой канал, брат! *хик* — я не знаю куда лететь.", mention_author=False)
         return False
@@ -270,12 +270,14 @@ async def _music_join(msg: discord.Message) -> bool:
     try:
         if vc and vc.is_connected():
             if vc.channel.id == channel.id:
-                await msg.reply(f"🚁 Я уже тут, в `{channel.name}` кручу винтами! 💅", mention_author=False)
+                # уже тут — молча, без спама (убрано "Я уже тут" по просьбе)
                 return True
             await vc.move_to(channel)
         else:
             await channel.connect(self_deaf=False)
-        await msg.reply(f"🚁 *влетаю* в `{channel.name}`! Скажи `Анечка включи <песня>` — и я заведу пластинку! 💿", mention_author=False)
+        if not silent:
+            # убрано спам-сообщение "Скажи Анечка включи <песня>" — теперь молча заходит
+            pass
         return True
     except Exception as e:
         await msg.reply(f"❌ Не смогла зайти: {e}", mention_author=False)
@@ -519,30 +521,26 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             desc += "Очередь пуста."
         await message.reply(desc or "Тихо...", mention_author=False)
         return True
-    # === Нейронка для понимания контекста (если не сработал готовый шаблон) ===
-    # Если сообщение начинается с имени (узи/анечка/uzi) и не попало выше — спрашиваем у Muse Spark что хотел пользователь
+    # === AI-нейронка для понимания контекста (если не сработал готовый шаблон) ===
+    # Понимает "выключи", "поставь на паузу", "включи Ost drone" и т.д. через Muse Spark
     if any(low_clean.startswith(n) for n in names):
         try:
-            # быстрая классификация через Opencode (1-2 сек), без истории
             query = low_clean
             for n in names:
                 if query.startswith(n):
                     query = query[len(n):].lstrip(" ,:-")
                     break
-            if len(query) < 3:
-                return False
-            # эвристика: если в тексте есть намек на музыку — дергаем нейронку
-            music_hints = ["музы", "песн", "трек", "саунд", "звук", "включи", "постав", "очеред", "плей", "play", "youtube", "youtu.be", "soundcloud", "spotify"]
-            if not any(h in query.lower() for h in music_hints) and len(query) < 15:
+            if len(query) < 2:
                 return False
             api_key = _cfg("AI_API_KEY", "")
             base_url = _cfg("AI_BASE_URL", "https://opencode.ai/zen/v1/responses")
             if not api_key or "opencode.ai" not in base_url:
                 return False
-            import aiohttp, json as _json
+            import aiohttp
+            # универсальный классификатор всех музыкальных интентов
             payload = {
                 "model": "muse-spark-1.2-contributor-free",
-                "instructions": "Ты классификатор. Пользователь пишет боту Узи. Определи хочет ли он включить/добавить музыку/звук в очередь в войсе. Если да — верни ТОЛЬКО запрос для поиска (название песни/ссылку) без лишних слов. Если нет — верни ровно NO. Примеры: 'поставь в очередь Обормот Gay ремикс' -> 'Обормот Gay ремикс', 'можешь врубить что нибудь из дронов убийц?' -> 'дронов убийц', 'как дела?' -> NO",
+                "instructions": "Ты классификатор для музыкального бота Узи. Пользователь пишет 'Узи <текст>'. Определи intent: PLAY (включить/добавить трек), STOP (выключить/остановить музыку), PAUSE (пауза/поставь на паузу), RESUME (продолжи/возобнови), SKIP (скип/дальше/следующий/next/пропусти), QUEUE (очередь/что играет), JOIN (зайди/го в войс/присоединись), LEAVE (выйди/ливни/покинь), или NO (обычный чат, не музыка). Если PLAY — верни ТОЛЬКО название/ссылку для поиска. Если STOP/PAUSE/RESUME/SKIP/QUEUE/JOIN/LEAVE — верни ровно это слово. Если NO — верни NO. Примеры: 'выключи' -> STOP, 'выключи музыку' -> STOP, 'выруби нахуй' -> STOP, 'поставь на паузу' -> PAUSE, 'пауза' -> PAUSE, 'продолжи' -> RESUME, 'скипни трек' -> SKIP, 'дальше' -> SKIP, 'что играет' -> QUEUE, 'зайди ко мне' -> JOIN, 'выйди' -> LEAVE, 'включи Ost drone' -> Ost drone, 'вруби тучка тучка' -> тучка тучка, 'как дела?' -> NO, 'привет' -> NO",
                 "input": query,
                 "temperature": 0.2,
                 "max_output_tokens": 60
@@ -561,13 +559,64 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
                                         ans = c["text"]
                                         break
                             if ans: break
-                    ans = (ans or data.get("output_text") or "").strip()
-                    if not ans or ans.upper() == "NO" or len(ans) < 2 or "NO" in ans.upper() and len(ans) < 6:
+                    ans = (ans or data.get("output_text") or "").strip().replace('"','').replace("'","").strip()
+                    if not ans or ans.upper() == "NO":
                         return False
-                    # нейронка сказала что это музыка — включаем
-                    ans = ans.replace('"','').replace("'","").strip()
-                    if len(ans) > 120:
-                        ans = ans[:120]
+                    up = ans.upper()
+                    # обрабатываем интенты
+                    if up == "STOP":
+                        vc = message.guild.voice_client
+                        if vc and (vc.is_playing() or vc.is_paused()):
+                            vc.stop()
+                            _music_queues[message.guild.id].clear()
+                            _now_playing.pop(message.guild.id, None)
+                            await message.reply("⏹️ Выключила, как скажешь 💜", mention_author=False)
+                        else:
+                            await message.reply("Тихо уже, ничего не играет", mention_author=False)
+                        return True
+                    if up == "PAUSE":
+                        vc = message.guild.voice_client
+                        if vc and vc.is_playing():
+                            vc.pause()
+                            await message.reply("⏸️ Пауза 💜", mention_author=False)
+                        else:
+                            await message.reply("Нечего ставить на паузу", mention_author=False)
+                        return True
+                    if up == "RESUME":
+                        vc = message.guild.voice_client
+                        if vc and vc.is_paused():
+                            vc.resume()
+                            await message.reply("▶️ Поехали дальше! 🚁", mention_author=False)
+                        else:
+                            await message.reply("Нечего продолжать", mention_author=False)
+                        return True
+                    if up == "SKIP":
+                        vc = message.guild.voice_client
+                        if vc and (vc.is_playing() or vc.is_paused()):
+                            vc.stop()
+                            await message.reply("⏭️ Скипаю...", mention_author=False)
+                        else:
+                            await message.reply("Очередь пуста", mention_author=False)
+                        return True
+                    if up == "QUEUE":
+                        q = _music_queues[message.guild.id]
+                        now = _now_playing.get(message.guild.id)
+                        desc = ""
+                        if now: desc += f"▶️ Сейчас: **{now['title']}**\n"
+                        if q: desc += "\n".join([f"{i}. {it['title']}" for i, it in enumerate(list(q)[:10], 1)])
+                        else: desc += "Очередь пуста."
+                        await message.reply(desc or "Тихо...", mention_author=False)
+                        return True
+                    if up == "JOIN":
+                        await _music_join(message, silent=True)
+                        return True
+                    if up == "LEAVE":
+                        await _music_leave(message)
+                        return True
+                    # иначе считаем PLAY — остаток это запрос для поиска
+                    if len(ans) < 2 or len(ans) > 120:
+                        if len(ans) > 120: ans = ans[:120]
+                        if len(ans) < 2: return False
                     await _music_enqueue(message, ans)
                     return True
         except Exception as e:
