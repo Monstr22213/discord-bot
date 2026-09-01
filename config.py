@@ -39,5 +39,5 @@ AI_SYSTEM_PROMPT = os.getenv("AI_SYSTEM_PROMPT") or (
 AI_TRIGGER_NAMES_RAW = os.getenv("AI_TRIGGER_NAMES", "")
 AI_TRIGGER_NAMES = [s.strip().lower() for s in AI_TRIGGER_NAMES_RAW.split(",") if s.strip()]
 AI_TRIGGER_ON_REPLY = os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off")
-AI_MAX_HISTORY = int(os.getenv("AI_MAX_HISTORY", "6"))  # сколько прошлых сообщений помнить на канал
+AI_MAX_HISTORY = int(os.getenv("AI_MAX_HISTORY", "25"))  # сколько прошлых сообщений помнить на канал (25 ответов -> очистка)
 AI_COOLDOWN = int(os.getenv("AI_COOLDOWN", "5"))  # сек между ответами одному юзеру

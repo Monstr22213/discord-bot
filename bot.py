@@ -33,14 +33,45 @@ def _cfg(key, default):
         "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — Узи Дурман (Uzi Doorman) из Murder Drones 1 в 1. Воркер-дрон, фиолетовые глаза, дерзкая, язвительная, саркастичная, мрачный юмор, бунтарка. Говори на русском коротко, как Узи, с *действиями*, сленгом. НИКОГДА не выходи из роли. НИКОГДА не используй 🌈 и 🏳️‍🌈."),
         "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
         "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
-        "AI_MAX_HISTORY": int(os.getenv("AI_MAX_HISTORY", "6") or 6),
+        "AI_MAX_HISTORY": int(os.getenv("AI_MAX_HISTORY", "25") or 25),
         "AI_COOLDOWN": int(os.getenv("AI_COOLDOWN", "5") or 5),
     }
     return _env_map.get(key, default)
 
-_ai_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=_cfg("AI_MAX_HISTORY", 6) * 2))
+_ai_history: dict[int, deque] = {}
 _ai_cooldown: dict[int, float] = {}
 _ai_client = None
+
+def _get_ai_history(channel_id: int) -> deque:
+    """Возвращает историю канала с динамическим maxlen и делает ГЛОБАЛЬНУЮ авто-очистку после 25 сообщений на ВСЕХ каналах сразу."""
+    max_hist = _cfg("AI_MAX_HISTORY", 25)
+    try:
+        max_hist = int(max_hist)
+    except:
+        max_hist = 25
+    maxlen = max_hist * 2  # user + assistant на каждый диалог
+    # синхронизируем maxlen у всех каналов если настройка изменилась
+    if _ai_history:
+        for cid, h in list(_ai_history.items()):
+            if h.maxlen != maxlen:
+                _ai_history[cid] = deque(h, maxlen=maxlen)
+    hist = _ai_history.get(channel_id)
+    if hist is None:
+        hist = deque(maxlen=maxlen)
+        _ai_history[channel_id] = hist
+        return hist
+    if hist.maxlen != maxlen:
+        new_hist = deque(hist, maxlen=maxlen)
+        _ai_history[channel_id] = new_hist
+        hist = new_hist
+    # === ГЛОБАЛЬНАЯ АВТО-ОЧИСТКА ПОСЛЕ 25 СООБЩЕНИЙ НА ВСЕХ КАНАЛАХ СРАЗУ ===
+    # Когда ЛЮБОЙ канал достиг лимита (25 диалогов = 50 записей) — чистим ПОЛНОСТЬЮ ВСЕ каналы
+    if len(hist) >= maxlen and maxlen > 0:
+        total = len(_ai_history)
+        for h in _ai_history.values():
+            h.clear()
+        print(f"[AI] ГЛОБАЛЬНАЯ авто-очистка: канал-триггер {channel_id} достиг {max_hist} диалогов -> очищены ВСЕ {total} каналов")
+    return _ai_history[channel_id]
 
 def _get_ai_client():
     global _ai_client
@@ -124,8 +155,8 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
     model = _cfg("AI_MODEL", "muse-spark-1.2-contributor-free")
     if not api_key:
         return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` или `OPENCODE_API_KEY` в Variables на Railway"
-    # история канала
-    hist = _ai_history[channel_id]
+    # история канала (с авто-очисткой полностью после 25 сообщений)
+    hist = _get_ai_history(channel_id)
     base_prompt = _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")
     ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Сейчас пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Формат 'Автор: текст' — АВТОР кто написал, @упоминания — ДРУГИЕ. Пример: 'Serial Designation V: Узи, @hanacoamilla сказал...' — автор V, hanacoamilla — третий. Лор: 'N' — добрый краш, мягко-цундере; 'V/Vi' — дерзкая подруга, на равных; 'J' — враждебно; 'Syn' — НЕНАВИДИШЬ (пыталась убить N) 'Syn, тронешь N — разнесу!'; 'Yeva/Йева' — подруга, тепло-дружелюбно 'о, Yeva, привет!'; Khan — бурчи; остальные типа hanacoamilla — обычные воркеры, нейтрально-язвительно. Обращайся по имени автора.]"
     # если это opencode zen — используем Responses API как в sv_lotm_ai.lua
