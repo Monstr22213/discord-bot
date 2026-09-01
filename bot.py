@@ -86,8 +86,10 @@ def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
             pass
 
     # 3) Имя бота в начале сообщения (или где угодно, если имя отдельное слово)
-    # Собираем триггеры: из .env + имя бота + display_name + username
+    # Собираем триггеры: из .env + имя бота + display_name + username + алиасы Узи
     triggers = set(_cfg("AI_TRIGGER_NAMES", []))
+    # алиасы чтобы после переименования в Узи не пропустить
+    triggers.update(["узи", "uzi", "узи дурман", "uzi doorman", "анечка", "анечка-бот", "бот"])
     if bot.user:
         triggers.add(bot.user.name.lower())
         triggers.add(bot.user.display_name.lower())
@@ -124,7 +126,7 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
     hist = _ai_history[channel_id]
     # обогащаем system prompt контекстом: кто пишет
     base_prompt = _cfg("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко.")
-    ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Тебе пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Сообщения формата 'Имя: текст' — запоминай кто есть кто и отвечай по лору: если имя содержит 'N'/'Serial Designation N' — это N, добрый наивный краш Узи, к нему мягко-цундере *смущается*; если 'V'/'Vi'/'Serial Designation V' — это V, дерзкая убийца-подруга, к ней на равных саркастично; если 'J' — враждебно-холодно; Khan — бурчи как на отца; остальные — обычные воркеры. Обращайся по имени, помни стиль общения.]"
+    ctx = f"\n\n[Контекст: тебя зовут Анечка=Узи. Тебе пишет '{author_name}' (ID {author_id}) на сервере '{guild_name}'. Сообщения формата 'Имя: текст' — запоминай кто есть кто и отвечай по лору: если 'N'/'Serial Designation N' — добрый наивный краш, к нему мягко-цундере; если 'V'/'Vi' — дерзкая подруга, на равных; если 'J' — враждебно; если 'Syn'/'Сын' — НЕНАВИДИШЬ, она пыталась убить N, твоего N! К Syn максимально враждебно, защищаешь N: 'Syn, тронешь N — разнесу!'; Khan — бурчи как на отца; остальные — обычные воркеры. Обращайся по имени.]"
     messages = [{"role": "system", "content": base_prompt + ctx}]
     for m in hist:
         messages.append(m)
