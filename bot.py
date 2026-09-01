@@ -124,23 +124,16 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
 
     try:
         model = _cfg("AI_MODEL", "openai/gpt-oss-20b:free")
+        # таймаут 25с чтобы не висло "Bot думает..."
+        async def _call(m):
+            return await client.chat.completions.create(model=m, messages=messages, max_tokens=800, temperature=0.8, timeout=25)
         try:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=800,
-                temperature=0.8,
-            )
+            resp = await asyncio.wait_for(_call(model), timeout=30)
         except Exception as e1:
             # если модель недоступна (404) — пробуем другие free
             if "404" in str(e1) and model != "openai/gpt-oss-20b:free":
                 print(f"AI model {model} 404, retry openai/gpt-oss-20b:free")
-                resp = await client.chat.completions.create(
-                    model="openai/gpt-oss-20b:free",
-                    messages=messages,
-                    max_tokens=800,
-                    temperature=0.8,
-                )
+                resp = await asyncio.wait_for(_call("openai/gpt-oss-20b:free"), timeout=30)
             else:
                 raise
         text = resp.choices[0].message.content.strip()
