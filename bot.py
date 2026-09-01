@@ -24,7 +24,7 @@ def _cfg(key, default):
         "AI_ENABLED": os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off"),
         "AI_API_KEY": os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", ""),
         "AI_BASE_URL": os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
-        "AI_MODEL": os.getenv("AI_MODEL", "openrouter/free"),
+        "AI_MODEL": os.getenv("AI_MODEL", "openai/gpt-oss-20b:free"),
         "AI_SYSTEM_PROMPT": os.getenv("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот. Отвечай на русском, коротко."),
         "AI_TRIGGER_NAMES": [s.strip().lower() for s in os.getenv("AI_TRIGGER_NAMES", "").split(",") if s.strip()],
         "AI_TRIGGER_ON_REPLY": os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off"),
@@ -123,7 +123,7 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
     messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
 
     try:
-        model = _cfg("AI_MODEL", "openrouter/free")
+        model = _cfg("AI_MODEL", "openai/gpt-oss-20b:free")
         try:
             resp = await client.chat.completions.create(
                 model=model,
@@ -132,11 +132,11 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
                 temperature=0.8,
             )
         except Exception as e1:
-            # если модель недоступна (404) — пробуем авто-роутер free
-            if "404" in str(e1) and model != "openrouter/free":
-                print(f"AI model {model} 404, retry openrouter/free")
+            # если модель недоступна (404) — пробуем другие free
+            if "404" in str(e1) and model != "openai/gpt-oss-20b:free":
+                print(f"AI model {model} 404, retry openai/gpt-oss-20b:free")
                 resp = await client.chat.completions.create(
-                    model="openrouter/free",
+                    model="openai/gpt-oss-20b:free",
                     messages=messages,
                     max_tokens=800,
                     temperature=0.8,

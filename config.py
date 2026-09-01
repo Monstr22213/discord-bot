@@ -16,7 +16,7 @@ SELF_ROLES = [int(r.strip()) for r in SELF_ROLES_RAW.split(",") if r.strip().isd
 AI_ENABLED = os.getenv("AI_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY", "") or os.getenv("AI_API_KEY", "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1")
-AI_MODEL = os.getenv("AI_MODEL", "openrouter/free")
+AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-oss-20b:free")
 AI_SYSTEM_PROMPT = os.getenv("AI_SYSTEM_PROMPT", "Ты — дружелюбный бот на Discord сервере Black ICE Palace. Отвечай на русском, коротко (до 400 символов если не просят подробнее), с юмором но без токсичности. Помогай пользователям.")
 # Имена через запятую, при упоминании которых бот ответит. Пример: "бот,мила,ice"
 AI_TRIGGER_NAMES_RAW = os.getenv("AI_TRIGGER_NAMES", "")
