@@ -1,6 +1,12 @@
 services:
-  - type: worker
+  - type: web
     name: discord-auth-bot
     env: docker
     plan: free
     autoDeploy: false
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PANEL_ENABLED
+        value: true
