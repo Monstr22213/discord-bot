@@ -7,10 +7,128 @@ import json
 import os
 import random
 import time
+import re
+import asyncio
+from collections import deque, defaultdict
 import urllib.parse as urlparse
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ============ AI CHAT (OpenRouter / OpenAI-compatible) ============
+_ai_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=config.AI_MAX_HISTORY * 2))
+_ai_cooldown: dict[int, float] = {}
+_ai_client = None
+
+def _get_ai_client():
+    global _ai_client
+    if _ai_client is not None:
+        return _ai_client
+    if not config.AI_API_KEY:
+        return None
+    try:
+        from openai import AsyncOpenAI
+        _ai_client = AsyncOpenAI(api_key=config.AI_API_KEY, base_url=config.AI_BASE_URL)
+        return _ai_client
+    except Exception as e:
+        print(f"AI client init fail: {e}")
+        return None
+
+def _is_ai_triggered(message: discord.Message) -> tuple[bool, str]:
+    """Проверяет пинг или имя бота. Возвращает (triggered, cleaned_text)."""
+    if not config.AI_ENABLED:
+        return False, ""
+    if message.author.bot:
+        return False, ""
+    content = message.content or ""
+    content_lower = content.lower().strip()
+
+    # 1) Пинг бота
+    if bot.user in message.mentions:
+        # убираем <@id> и <@!id>
+        cleaned = re.sub(rf"<@!?{bot.user.id}>", "", content).strip()
+        # убираем лишние пробелы/запятые после пинга
+        cleaned = re.sub(r"^[\s,:\-]+", "", cleaned)
+        return True, cleaned if cleaned else content
+
+    # 2) Ответ на сообщение бота (reply)
+    if config.AI_TRIGGER_ON_REPLY and message.reference and message.reference.message_id:
+        try:
+            ref_id = message.reference.message_id
+            # эвристика: если в истории канала последнее от бота — считаем reply триггером
+            # точнее — можно fetch, но чтобы не спамить API, делаем быстро
+            if any(m.get("role") == "assistant" for m in _ai_history.get(message.channel.id, [])):
+                # проверяем, что это реально ответ (Discord покажет reference)
+                return True, content
+        except:
+            pass
+
+    # 3) Имя бота в начале сообщения (или где угодно, если имя отдельное слово)
+    # Собираем триггеры: из .env + имя бота + display_name + username
+    triggers = set(config.AI_TRIGGER_NAMES)
+    if bot.user:
+        triggers.add(bot.user.name.lower())
+        triggers.add(bot.user.display_name.lower())
+        # без дискриминатора
+        triggers.add(bot.user.name.lower().split("#")[0])
+    # убираем пустые
+    triggers = {t for t in triggers if t}
+    if not triggers:
+        return False, ""
+
+    # проверяем в начале: "мила привет" или "бот, как дела?" или "ice помоги"
+    for name in triggers:
+        # в начале сообщения
+        if content_lower.startswith(name):
+            # отрезаем имя + возможный разделитель , : - 
+            pattern = re.compile(rf"^{re.escape(name)}[\s,:\-]*", re.IGNORECASE)
+            cleaned = pattern.sub("", content, count=1).strip()
+            if cleaned:
+                return True, cleaned
+            else:
+                # просто "мила" без текста — тоже триггер, но вернем пусто чтобы бот спросил что надо
+                return True, ""
+        # упоминание имени как отдельного слова где угодно: "привет мила как дела"
+        # чтобы не триггерить на каждое "бот" в середине, требуем чтобы слово стояло отдельно и сообщение короткое
+        # оставим только "в начале" для точности, чтобы не спамить
+
+    return False, ""
+
+async def _ask_ai(prompt: str, channel_id: int, author_name: str) -> str:
+    client = _get_ai_client()
+    if not client:
+        return "❌ AI не настроен: добавь `OPENROUTER_API_KEY` в .env (https://openrouter.ai/keys)"
+    # история канала
+    hist = _ai_history[channel_id]
+    messages = [{"role": "system", "content": config.AI_SYSTEM_PROMPT}]
+    for m in hist:
+        messages.append(m)
+    messages.append({"role": "user", "content": f"{author_name}: {prompt}"})
+
+    try:
+        resp = await client.chat.completions.create(
+            model=config.AI_MODEL,
+            messages=messages,
+            max_tokens=800,
+            temperature=0.8,
+        )
+        text = resp.choices[0].message.content.strip()
+        # сохраняем в историю
+        hist.append({"role": "user", "content": prompt})
+        hist.append({"role": "assistant", "content": text})
+        # лимит Discord 2000
+        if len(text) > 1900:
+            text = text[:1900] + "…"
+        return text
+    except Exception as e:
+        err = str(e)
+        print(f"AI error: {err}")
+        # дружелюбное сообщение
+        if "401" in err or "auth" in err.lower():
+            return "❌ Ошибка ключа OpenRouter — проверь OPENROUTER_API_KEY в .env"
+        if "429" in err:
+            return "⏳ AI перегружен (429), попробуй через минуту"
+        return f"❌ Ошибка AI: {err[:300]}"
 
 # ============ ЭКОНОМИКА СПЕРМИКИ (сохранение) ============
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PRIVATE_URL")
@@ -610,6 +728,47 @@ async def on_member_remove(member: discord.Member):
         if ch:
             await ch.send(f"📤 Вышел {member.display_name} `{member.id}`")
 
+@bot.event
+async def on_message(message: discord.Message):
+    # Сначала обрабатываем команды с префиксом "!"
+    await bot.process_commands(message)
+
+    # AI: отвечает на пинг или имя
+    triggered, prompt = _is_ai_triggered(message)
+    if not triggered:
+        return
+
+    # Кулдаун анти-спам
+    now = time.time()
+    last = _ai_cooldown.get(message.author.id, 0)
+    if now - last < config.AI_COOLDOWN:
+        # молча игнорим или можно реагировать
+        return
+    _ai_cooldown[message.author.id] = now
+
+    if not prompt or len(prompt.strip()) < 1:
+        await message.reply("👋 Да, я тут! Напиши вопрос после моего имени или пинга. Напр: `@бот как дела?` или `мила расскажи анекдот`")
+        return
+
+    # Защита от слишком длинных промптов
+    if len(prompt) > 1500:
+        prompt = prompt[:1500]
+
+    async with message.channel.typing():
+        # небольшая задержка чтобы выглядело живее, + даем время набрать историю
+        answer = await _ask_ai(prompt, message.channel.id, message.author.display_name)
+
+    try:
+        await message.reply(answer, mention_author=False, allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
+    except discord.HTTPException:
+        try:
+            await message.channel.send(f"{message.author.mention} {answer}", allowed_mentions=discord.AllowedMentions(users=True))
+        except:
+            pass
+
+    # Команда очистки истории AI (только сам пользователь или админ) — по слову "забудь"
+    # не делаем отдельной команды, можно расширить позже
+
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="верификация", description="Создать сообщение для верификации (только админ)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -1165,6 +1324,42 @@ async def redeem_promo(interaction: discord.Interaction, код: str):
         await interaction.response.send_message(f"✅ +{reward} 💦 активировано!", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+
+# ============ AI SLASH COMMANDS ============
+@bot.tree.command(name="ai", description="Спросить у AI (работает и по пингу/имени)")
+@app_commands.describe(вопрос="Что спросить у бота")
+async def ai_chat(interaction: discord.Interaction, вопрос: str):
+    if not config.AI_ENABLED:
+        await interaction.response.send_message("❌ AI выключен (AI_ENABLED=false)", ephemeral=True)
+        return
+    if not config.AI_API_KEY:
+        await interaction.response.send_message("❌ AI не настроен: нет OPENROUTER_API_KEY в .env", ephemeral=True)
+        return
+    await interaction.response.defer()
+    answer = await _ask_ai(вопрос[:1500], interaction.channel_id, interaction.user.display_name)
+    try:
+        await interaction.followup.send(answer)
+    except:
+        await interaction.followup.send(answer[:1900])
+
+@bot.tree.command(name="ai-сброс", description="Сбросить историю AI в этом канале")
+async def ai_reset(interaction: discord.Interaction):
+    _ai_history[interaction.channel_id].clear()
+    await interaction.response.send_message("✅ История AI в этом канале очищена", ephemeral=True)
+
+@bot.tree.command(name="ai-статус", description="Статус AI")
+async def ai_status(interaction: discord.Interaction):
+    enabled = "✅ Вкл" if config.AI_ENABLED else "❌ Выкл"
+    has_key = "✅ есть" if config.AI_API_KEY else "❌ нет (добавь OPENROUTER_API_KEY)"
+    names = ", ".join(config.AI_TRIGGER_NAMES) if config.AI_TRIGGER_NAMES else "(только пинг + имя бота)"
+    embed = discord.Embed(title="🤖 AI статус", color=discord.Color.blurple())
+    embed.add_field(name="Включен", value=enabled, inline=True)
+    embed.add_field(name="Ключ", value=has_key, inline=True)
+    embed.add_field(name="Модель", value=f"`{config.AI_MODEL}`", inline=False)
+    embed.add_field(name="Триггеры", value=names, inline=False)
+    embed.add_field(name="Как общаться", value="• Пингани бота: `@бот привет`\n• Назови по имени: `мила как дела?`\n• Или `/ai вопрос: привет`", inline=False)
+    embed.set_footer(text=f"Base: {config.AI_BASE_URL} • Кулдаун {config.AI_COOLDOWN}с")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Квест Димы полностью удален по запросу
 
