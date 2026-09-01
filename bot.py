@@ -331,27 +331,33 @@ async def _music_enqueue(msg: discord.Message, query: str):
         _music_play_next(msg.guild)
 
 async def _handle_music_triggers(message: discord.Message) -> bool:
-    """Возвращает True если это музыкальная команда и уже обработана (не надо в AI)."""
+    """Возвращает True если это музыкальная команда и уже обработана (не надо в AI). Поддерживает Анечка/Узи/Uzi."""
     if not message.guild or message.author.bot:
         return False
     low = message.content.lower().strip()
     # убираем пинг в начале
     low_clean = re.sub(rf"<@!?{bot.user.id}>" if bot.user else r"<@!?\d+>", "", low).strip() if bot.user else low
-    # триггеры
-    if low_clean.startswith("анечка зайди") or low_clean.startswith("анечка го в войс") or low_clean.startswith("анечка присоединись") or low_clean == "анечка зайди к нам":
+    def _start_any(names, *suffixes):
+        for n in names:
+            for s in suffixes:
+                if low_clean.startswith(f"{n} {s}") or low_clean == f"{n} {s}":
+                    return True
+        return False
+    names = ["анечка", "узи", "uzi"]
+    # зайди
+    if _start_any(names, "зайди", "зайди ко мне", "зайди к нам", "го в войс", "присоединись"):
         await _music_join(message)
         return True
-    if low_clean.startswith("анечка выйди") or low_clean.startswith("анечка ливни") or low_clean.startswith("анечка покинь") or low_clean.startswith("анечка уйди"):
+    if _start_any(names, "выйди", "ливни", "покинь", "уйди", "выйди из войса"):
         await _music_leave(message)
         return True
-    if low_clean.startswith("анечка включи"):
-        q = message.content[len("анечка включи"):].strip() if message.content.lower().strip().startswith("анечка включи") else re.sub(r"^.*?анечка включи\s*", "", message.content, flags=re.I).strip()
-        # также поддержка "анечка включи музыку ..." -> уже в q
-        # убираем пинг если был
+    if any(low_clean.startswith(f"{n} включи") for n in names):
+        # вытаскиваем query после "включи"
+        q = re.sub(r"^(?:анечка|узи|uzi)\s+включи\s*", "", message.content, flags=re.I).strip()
         q = re.sub(rf"<@!?{bot.user.id}>", "", q).strip() if bot.user else q
         await _music_enqueue(message, q)
         return True
-    if low_clean.startswith("анечка стоп") or low_clean.startswith("анечка пауза"):
+    if _start_any(names, "стоп", "пауза"):
         vc = message.guild.voice_client
         if vc and vc.is_playing():
             vc.pause()
@@ -359,7 +365,7 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
         else:
             await message.reply("Нечего ставить на паузу.", mention_author=False)
         return True
-    if low_clean.startswith("анечка продолжи") or low_clean.startswith("анечка резюме") or low_clean.startswith("анечка play"):
+    if _start_any(names, "продолжи", "резюме", "play"):
         vc = message.guild.voice_client
         if vc and vc.is_paused():
             vc.resume()
@@ -367,7 +373,7 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
         else:
             await message.reply("Нечего продолжать.", mention_author=False)
         return True
-    if low_clean.startswith("анечка скип") or low_clean.startswith("анечка дальше") or low_clean.startswith("анечка пропусти") or low_clean.startswith("анечка next"):
+    if _start_any(names, "скип", "дальше", "пропусти", "next", "скипни"):
         vc = message.guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()  # after вызовет следующий
@@ -375,7 +381,7 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
         else:
             await message.reply("Очередь пуста.", mention_author=False)
         return True
-    if low_clean.startswith("анечка очередь") or low_clean.startswith("анечка что играет"):
+    if _start_any(names, "очередь", "что играет", "что сейчас играет"):
         q = _music_queues[message.guild.id]
         now = _now_playing.get(message.guild.id)
         desc = ""
