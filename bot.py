@@ -345,7 +345,7 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
         return False
     names = ["анечка", "узи", "uzi"]
     # зайди
-    if _start_any(names, "зайди", "зайди ко мне", "зайди к нам", "го в войс", "присоединись"):
+    if _start_any(names, "зайди", "зайди ко мне", "зайди к нам", "го в войс", "го к нам", "присоединись", "зайди в войс"):
         await _music_join(message)
         return True
     if _start_any(names, "выйди", "ливни", "покинь", "уйди", "выйди из войса"):
