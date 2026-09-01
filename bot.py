@@ -352,7 +352,8 @@ async def _music_enqueue(msg: discord.Message, query: str):
             ydl_opts["cookiefile"] = tf.name
         except:
             pass
-        client_sets = [["web"]]  # с куками web лучше
+        # с куками web лучше, но оставляем фолбэки если формат не доступен
+        client_sets = [["web"], ["android","web"], ["android_music","android"], ["ios","android","web"]]
     loop = asyncio.get_event_loop()
     def _extract():
         last_err = None
@@ -368,11 +369,34 @@ async def _music_enqueue(msg: discord.Message, query: str):
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         if query.startswith("http"):
                             info = ydl.extract_info(query, download=False)
+                            return info
                         else:
-                            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                            if "entries" in info:
-                                info = info["entries"][0] if info["entries"] else None
-                        return info
+                            # ищем 5 результатов и пробуем каждый — первый часто без аудио
+                            search = ydl.extract_info(f"ytsearch5:{query}", download=False)
+                            entries = search.get("entries") or []
+                            for entry in entries:
+                                if not entry:
+                                    continue
+                                # entries из ytsearch уже содержат formats/url — проверяем
+                                if entry.get("formats") or entry.get("url"):
+                                    # если формат не подошёл — попробуем детальную загрузку
+                                    try:
+                                        # пробуем детально по webpage_url чтобы проверить форматы
+                                        detail_url = entry.get("webpage_url") or entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
+                                        if detail_url and detail_url.startswith("http"):
+                                            detail = ydl.extract_info(detail_url, download=False)
+                                            if detail and (detail.get("url") or detail.get("formats")):
+                                                return detail
+                                    except Exception as e2:
+                                        last_err = e2
+                                        if "Requested format is not available" in str(e2):
+                                            continue
+                                    return entry
+                            # если ни одна entry не подошла
+                            if entries:
+                                return entries[0]
+                            last_err = Exception("No search results")
+                            continue
                 except Exception as e:
                     last_err = e
                     msg = str(e)
@@ -380,6 +404,9 @@ async def _music_enqueue(msg: discord.Message, query: str):
                         break  # пробуем следующий client_set, не форматы
                     if "Requested format is not available" in msg or "format is not available" in msg.lower():
                         continue  # пробуем следующий формат
+                    # для ytsearch — пробуем следующий формат тоже
+                    if "ytsearch" in query.lower() or not query.startswith("http"):
+                        continue
                     raise
         if last_err:
             raise last_err
