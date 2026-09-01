@@ -363,10 +363,15 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
     if _start_any(names, "выйди", "ливни", "покинь", "уйди", "выйди из войса"):
         await _music_leave(message)
         return True
-    if any(low_clean.startswith(f"{n} включи") for n in names):
-        # вытаскиваем query после "включи"
-        q = re.sub(r"^(?:анечка|узи|uzi)\s+включи\s*", "", message.content, flags=re.I).strip()
+    # умные музыкальные триггеры: "узи включи/поставь/добавь/запусти/в очередь/плей"
+    if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["включи","поставь","добавь","запусти","очередь","плей","play"]):
+        q = re.sub(r"^(?:анечка|узи|uzi)\s+(?:включи|поставь(?:\s+в\s+очередь)?|добавь(?:\s+в\s+очередь)?|запусти|плей|play)\s*", "", message.content, flags=re.I).strip()
+        q = re.sub(r"^(?:в\s+очередь\s*)", "", q, flags=re.I).strip()
         q = re.sub(rf"<@!?{bot.user.id}>", "", q).strip() if bot.user else q
+        if q and len(q) > 2:
+            await _music_enqueue(message, q)
+            return True
+        # если запрос пустой но явно музыка — не кидаем в AI
         await _music_enqueue(message, q)
         return True
     if _start_any(names, "стоп", "пауза"):
@@ -405,6 +410,60 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             desc += "Очередь пуста."
         await message.reply(desc or "Тихо...", mention_author=False)
         return True
+    # === Нейронка для понимания контекста (если не сработал готовый шаблон) ===
+    # Если сообщение начинается с имени (узи/анечка/uzi) и не попало выше — спрашиваем у Muse Spark что хотел пользователь
+    if any(low_clean.startswith(n) for n in names):
+        try:
+            # быстрая классификация через Opencode (1-2 сек), без истории
+            query = low_clean
+            for n in names:
+                if query.startswith(n):
+                    query = query[len(n):].lstrip(" ,:-")
+                    break
+            if len(query) < 3:
+                return False
+            # эвристика: если в тексте есть намек на музыку — дергаем нейронку
+            music_hints = ["музы", "песн", "трек", "саунд", "звук", "включи", "постав", "очеред", "плей", "play", "youtube", "youtu.be", "soundcloud", "spotify"]
+            if not any(h in query.lower() for h in music_hints) and len(query) < 15:
+                return False
+            api_key = _cfg("AI_API_KEY", "")
+            base_url = _cfg("AI_BASE_URL", "https://opencode.ai/zen/v1/responses")
+            if not api_key or "opencode.ai" not in base_url:
+                return False
+            import aiohttp, json as _json
+            payload = {
+                "model": "muse-spark-1.2-contributor-free",
+                "instructions": "Ты классификатор. Пользователь пишет боту Узи. Определи хочет ли он включить/добавить музыку/звук в очередь в войсе. Если да — верни ТОЛЬКО запрос для поиска (название песни/ссылку) без лишних слов. Если нет — верни ровно NO. Примеры: 'поставь в очередь Обормот Gay ремикс' -> 'Обормот Gay ремикс', 'можешь врубить что нибудь из дронов убийц?' -> 'дронов убийц', 'как дела?' -> NO",
+                "input": query,
+                "temperature": 0.2,
+                "max_output_tokens": 60
+            }
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(base_url, json=payload, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status != 200:
+                        return False
+                    data = await r.json()
+                    ans = None
+                    if data.get("output"):
+                        for out in data["output"]:
+                            if out.get("content"):
+                                for c in out["content"]:
+                                    if c.get("text"):
+                                        ans = c["text"]
+                                        break
+                            if ans: break
+                    ans = (ans or data.get("output_text") or "").strip()
+                    if not ans or ans.upper() == "NO" or len(ans) < 2 or "NO" in ans.upper() and len(ans) < 6:
+                        return False
+                    # нейронка сказала что это музыка — включаем
+                    ans = ans.replace('"','').replace("'","").strip()
+                    if len(ans) > 120:
+                        ans = ans[:120]
+                    await _music_enqueue(message, ans)
+                    return True
+        except Exception as e:
+            print(f"ai music intent fail: {e}")
+            return False
     return False
 
 # ============ ЭКОНОМИКА СПЕРМИКИ (сохранение) ============
