@@ -1804,6 +1804,27 @@ async def perm_error(interaction: discord.Interaction, error):
     else:
         await interaction.response.send_message(f"❌ Ошибка: {error}", ephemeral=True)
 
+# ============ WEB PANEL (сайт для настройки промпта) ============
+def _start_panel():
+    if os.getenv("PANEL_ENABLED", "true").lower() in ("0","false","no","off"):
+        return
+    try:
+        from threading import Thread
+        def run():
+            try:
+                from panel import app as panel_app
+                port = int(os.getenv("PORT", "8080"))
+                print(f"[Panel] старт на 0.0.0.0:{port}")
+                panel_app.run(host="0.0.0.0", port=port, use_reloader=False)
+            except Exception as e:
+                print(f"[Panel] fail: {e}")
+        t = Thread(target=run, daemon=True)
+        t.start()
+    except Exception as e:
+        print(f"panel thread fail: {e}")
+
+_start_panel()
+
 # ============ RUN ============
 if not config.TOKEN:
     print("❌ DISCORD_TOKEN не найден в .env !")
