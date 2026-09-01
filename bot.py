@@ -202,7 +202,22 @@ async def _ask_ai(prompt: str, channel_id: int, author_name: str, author_id: int
         if "401" in err or "auth" in err.lower():
             return "❌ Ошибка ключа — проверь OPENCODE_API_KEY/OPENROUTER_API_KEY в Variables"
         if "429" in err:
-            return "⏳ AI перегружен (429), попробуй через минуту"
+            # пробуем обойти 429 другой API: если был opencode — пробуем OpenRouter free, и наоборот
+            try:
+                alt_base = "https://api.openai.com/v1" if is_opencode else "https://opencode.ai/zen/v1/responses"
+                alt_model = "openai/gpt-oss-20b:free" if is_opencode else "muse-spark-1.2-contributor-free"
+                # если уже пробовали — не зацикливаем
+                if alt_model != model:
+                    print(f"429 fallback {model} -> {alt_model}")
+                    # рекурсивный вызов с другим base (экономим)
+                    # временно подменяем cfg через env
+                    os.environ["AI_BASE_URL"]=alt_base
+                    os.environ["AI_MODEL"]=alt_model
+                    # один ретрай
+                    return await _ask_ai(prompt, channel_id, author_name, author_id, guild_name)
+            except Exception as e2:
+                print(f"429 fallback fail: {e2}")
+            return "⏳ AI перегружен (429) — лимит free 50/день (1000/день после $10 на OpenRouter). Попробуй через минуту или смени API: Variables AI_BASE_URL= https://api.groq.com/openai/v1 с ключом gsk_  (Groq лимиты выше) или кинь $10 на OpenRouter."
         return f"❌ Ошибка AI: {err[:400]}"
 
 # ============ МУЗЫКА (Анечка зайди / включи) ============
