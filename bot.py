@@ -943,6 +943,13 @@ async def on_message(message: discord.Message):
     # Сначала обрабатываем команды с префиксом "!"
     await bot.process_commands(message)
 
+    # Музыка: сначала проверяем "Анечка зайди/включи" — не отдаём в AI
+    try:
+        if await _handle_music_triggers(message):
+            return
+    except Exception as e:
+        print(f"music trigger error: {e}")
+
     # AI: отвечает на пинг или имя
     triggered, prompt = _is_ai_triggered(message)
     if not triggered:
@@ -1584,6 +1591,84 @@ async def ai_status(interaction: discord.Interaction):
     embed.add_field(name="Как общаться", value="• Пингани бота: `@бот привет`\n• Назови по имени: `мила как дела?`\n• Или `/ai prompt: привет`", inline=False)
     embed.set_footer(text=f"Base: {_cfg('AI_BASE_URL','?')} • Кулдаун {_cfg('AI_COOLDOWN',5)}с")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ============ MUSIC SLASH COMMANDS ============
+@bot.tree.command(name="join", description="Анечка зайдёт в твой войс")
+async def slash_join(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("Зайди в войс сначала! 🚁", ephemeral=True)
+        return
+    await interaction.response.defer()
+    # создаём фейк message для переиспользования логики
+    class FakeMsg:
+        def __init__(self, inter):
+            self.author = inter.user
+            self.guild = inter.guild
+            self.channel = inter.channel
+            self.reply = inter.followup.send
+            self.content = "анечка зайди"
+        async def reply(self, *a, **kw):
+            return await interaction.followup.send(*a, **kw)
+    # проще напрямую
+    try:
+        channel = interaction.user.voice.channel
+        vc = interaction.guild.voice_client
+        if vc and vc.is_connected():
+            await vc.move_to(channel)
+        else:
+            await channel.connect()
+        await interaction.followup.send(f"🚁 Влетела в `{channel.name}`! Пиши `Анечка включи <песня>`")
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+
+@bot.tree.command(name="play", description="Включить музыку (ссылка или название)")
+@app_commands.describe(query="Ссылка YouTube или название песни")
+async def slash_play(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
+    # переиспользуем enqueue но нужен message-like
+    class Dummy:
+        def __init__(self):
+            self.guild = interaction.guild
+            self.author = interaction.user
+            self.channel = interaction.channel
+            self.content = f"анечка включи {query}"
+        async def reply(self, msg, **kw):
+            await interaction.followup.send(msg, **kw)
+    dummy = Dummy()
+    # копируем логику join+enqueue
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.followup.send("Зайди в войс! 🚁")
+        return
+    # ensure vc
+    vc = interaction.guild.voice_client
+    if not vc or not vc.is_connected():
+        try:
+            await interaction.user.voice.channel.connect()
+        except Exception as e:
+            await interaction.followup.send(f"❌ Не зашла: {e}")
+            return
+    await _music_enqueue(dummy, query)
+    # _music_enqueue уже ответит через dummy.reply -> followup
+
+@bot.tree.command(name="stop", description="Остановить и выйти из войса")
+async def slash_stop(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc:
+        _music_queues[interaction.guild.id].clear()
+        _now_playing.pop(interaction.guild.id, None)
+        await vc.disconnect()
+        await interaction.response.send_message("🚁 Улетела! Пока! 💋")
+    else:
+        await interaction.response.send_message("Я не в войсе", ephemeral=True)
+
+@bot.tree.command(name="skip", description="Пропустить трек")
+async def slash_skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+        await interaction.response.send_message("⏭️ Скипнула! 🚁")
+    else:
+        await interaction.response.send_message("Нечего скипать", ephemeral=True)
 
 # Глобальный обработчик ошибок slash-команд — чтобы не было "Приложение не отвечает"
 @bot.tree.error
