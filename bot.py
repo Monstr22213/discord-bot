@@ -1,4 +1,4 @@
-import discord
+﻿import discord
 from discord import app_commands
 from discord.ext import commands
 import config
@@ -362,12 +362,17 @@ async def _music_enqueue(msg: discord.Message, query: str):
         await msg.reply("❌ yt-dlp не установлен на хосте. Добавь в requirements и пересобери.", mention_author=False)
         return
     # YouTube с Railway IP просит куки — пробуем несколько клиентов, + YT_COOKIES если есть
-    # FIX для "Requested format is not available" (SABR): сначала extract БЕЗ format, потом ручной выбор аудио из formats
-    base_ydl_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
-    client_sets = [["web"], ["android", "web"], ["android_music", "android"], ["ios", "android", "web"], ["mweb"]]
-    # пробуем СНАЧАЛА без ограничения формата (None) — это ключ к фиксу SABR, потом мягкие аудио-форматы
-    format_tries = [None, "bestaudio[ext=m4a]/bestaudio/best", "bestaudio", "best", "worsteverything"]
+    # FIX для "Requested format is not available" (SABR/PO-Token) — см. логи 17:08:53 vVQXkBDbG1E
     import tempfile
+    class _SilentLogger:
+        def debug(self, msg): pass
+        def warning(self, msg): pass
+        def error(self, msg): pass
+        def info(self, msg): pass
+    base_ydl_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "ignoreerrors": False, "ignore_no_formats_error": True, "logger": _SilentLogger(), "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "retries": 1, "fragment_retries": 1, "extractor_retries": 0, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}}
+    # приоритет android/ios — они обходят PO-Token/SABR, web — fallback с куками
+    client_sets = [["android"], ["android_music"], ["ios"], ["web"], ["mweb"], ["tv"], ["android", "web"]]
+    format_tries = [None, "bestaudio[ext=m4a]/bestaudio/best", "bestaudio", "best", "worst"]
     cookies_data = os.getenv("YT_COOKIES", "")
     ydl_opts_base = base_ydl_opts.copy()
     if cookies_data and "netscape" in cookies_data.lower():
@@ -378,6 +383,14 @@ async def _music_enqueue(msg: discord.Message, query: str):
             ydl_opts_base["cookiefile"] = tf.name
         except:
             pass
+        client_sets = [["web"], ["web", "android"], ["android"], ["ios"], ["tv"]]
+    # если запрос явно "фиксик" — подмешиваем музыкальный маркер чтобы не ловить болтовню/тот самый vVQXkBDbG1E
+    _ql = query.lower().strip()
+    if _ql in ("фиксиков", "фиксики", "фикс", "фикси", "fixiki", "fixies") or _ql.startswith("фиксик"):
+        # пробуем более музыкальный поиск первым, оригинальный — вторым
+        search_queries = [query + " песня", query + " музыка", query, "Фиксики песенка"]
+    else:
+        search_queries = [query]
 
     def _pick_best_url(info):
         # 1) прямой url выбранный yt-dlp
@@ -412,6 +425,28 @@ async def _music_enqueue(msg: discord.Message, query: str):
             return fmts[-1]["url"]
 
     loop = asyncio.get_event_loop()
+    # хелпер: поиск с ротацией запросов и клиентов
+    def _search_entries_for(candidates):
+        last = None
+        for sq in candidates:
+            for clients in client_sets:
+                search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "ignoreerrors": True, "logger": _SilentLogger(), "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
+                if "cookiefile" in ydl_opts_base:
+                    search_opts["cookiefile"] = ydl_opts_base["cookiefile"]
+                search_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                try:
+                    with yt_dlp.YoutubeDL(search_opts) as ydl_search:
+                        search = ydl_search.extract_info(f"ytsearch5:{sq}", download=False)
+                        entries = (search.get("entries") or []) if search else []
+                        # фильтруем битые и тот самый проблемный ID который всегда без формата
+                        entries = [e for e in entries if e and e.get("id") != "vVQXkBDbG1E"]
+                        if entries:
+                            return entries
+                except Exception as e:
+                    last = e
+                    continue
+        return None
+
     def _extract():
         last_err = None
         # если прямая ссылка — пробуем сразу с каждым клиентом/форматом, выбирая url вручную
@@ -419,7 +454,7 @@ async def _music_enqueue(msg: discord.Message, query: str):
             for clients in client_sets:
                 for fmt in format_tries:
                     opts = ydl_opts_base.copy()
-                    opts["extractor_args"] = {"youtube": {"player_client": clients, "player_skip": ["js", "configs"]}}
+                    opts["extractor_args"] = {"youtube": {"player_client": clients}}
                     if fmt is None:
                         opts.pop("format", None)
                     else:
@@ -431,12 +466,13 @@ async def _music_enqueue(msg: discord.Message, query: str):
                             if url_test:
                                 info["url"] = url_test
                                 return info
-                            # если url не нашли но info есть — вернём как есть, дальше _pick_best_url добьет
                             if info.get("formats"):
                                 return info
                     except Exception as e:
                         last_err = e
                         msg = str(e)
+                        if "vVQXkBDbG1E" in msg:
+                            continue
                         if "Requested format is not available" in msg or "format is not available" in msg.lower():
                             continue
                         if "Sign in" in msg or "cookies" in msg.lower():
@@ -446,33 +482,23 @@ async def _music_enqueue(msg: discord.Message, query: str):
                 raise last_err
             return None
 
-        # --- поиск по ключевым словам ---
-        # 1) ищем ytsearch5 БЕЗ ограничения формата (иначе падает на некоторых видосах)
-        search_entries = None
-        for clients in client_sets:
-            search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
-            if "cookiefile" in ydl_opts_base:
-                search_opts["cookiefile"] = ydl_opts_base["cookiefile"]
-            search_opts["extractor_args"] = {"youtube": {"player_client": clients}}
-            try:
-                with yt_dlp.YoutubeDL(search_opts) as ydl_search:
-                    search = ydl_search.extract_info(f"ytsearch5:{query}", download=False)
-                    entries = search.get("entries") or []
-                    if entries:
-                        search_entries = entries
-                        break
-            except Exception as e:
-                last_err = e
-                continue
+        search_entries = _search_entries_for(search_queries)
         if not search_entries:
+            # последний шанс: пробуем scsearch (SoundCloud) как фолбэк если youtube полностью отвалился
+            try:
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _SilentLogger(), "extract_flat": False, "skip_download": True}) as ydl2:
+                    s = ydl2.extract_info(f"scsearch1:{query}", download=False)
+                    if s and (s.get("url") or s.get("formats")):
+                        return s
+            except:
+                pass
             if last_err:
                 raise last_err
             return None
 
-        # фильтр музыки: отсеиваем болтовню типа "ВЕРНУЛИСЬ! НЕУЖЕЛИ 2 СЕЗОН" — ищем OST/music
         def _is_music(e):
             t = (e.get("title") or "").lower()
-            music_kw = ["ost", "music", "song", "soundtrack", "audio", "official", "mv", "m/v", "amv", "nightcore", "cover", "remix", "phonk", "trap", "lofi", "instrumental", "theme", "opening", "ending"]
+            music_kw = ["ost", "music", "song", "soundtrack", "audio", "official", "mv", "m/v", "amv", "nightcore", "cover", "remix", "phonk", "trap", "lofi", "instrumental", "theme", "opening", "ending", "песн", "музык"]
             if any(k in t for k in music_kw):
                 return True
             ql = query.lower()
@@ -480,14 +506,18 @@ async def _music_enqueue(msg: discord.Message, query: str):
                 return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"])
             if "грустн" in ql or "atmospheric" in ql or "sad" in ql:
                 return True
+            if "фиксик" in ql:
+                # для фиксиков требуем песню/музыку в названии
+                return any(k in t for k in ["песн", "музык", "song", "music", "караоке", "сборник"])
             return True
         entries_sorted = sorted(search_entries, key=lambda e: 0 if _is_music(e) else 1)
 
-        # 2) для каждого найденного видео пробуем вытянуть форматы — перебираем клиентов и формат-стратегии
         for entry in entries_sorted:
             if not entry:
                 continue
             vid = entry.get("id")
+            if vid == "vVQXkBDbG1E":
+                continue
             url = entry.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None) or entry.get("url")
             if not url:
                 continue
@@ -497,7 +527,7 @@ async def _music_enqueue(msg: discord.Message, query: str):
             for clients in client_sets:
                 for fmt in format_tries:
                     opts = ydl_opts_base.copy()
-                    opts["extractor_args"] = {"youtube": {"player_client": clients, "player_skip": ["js", "configs"]}}
+                    opts["extractor_args"] = {"youtube": {"player_client": clients}}
                     if fmt is None:
                         opts.pop("format", None)
                     else:
@@ -510,7 +540,6 @@ async def _music_enqueue(msg: discord.Message, query: str):
                             best = _pick_best_url(detail)
                             if best:
                                 detail["url"] = best
-                                # доп проверка болтовни после детального title
                                 dtitle = (detail.get("title") or dt).lower()
                                 if ("вернулись" in dtitle and "сезон" in dtitle and "murder drones" in dtitle and "ost" not in dtitle and "music" not in dtitle):
                                     last_err = Exception(f"skip non-music: {dtitle[:60]}")
@@ -520,28 +549,35 @@ async def _music_enqueue(msg: discord.Message, query: str):
                                 return detail
                     except Exception as e2:
                         last_err = e2
+                        if "vVQXkBDbG1E" in str(e2):
+                            continue
                         if "Requested format is not available" in str(e2) or "format is not available" in str(e2).lower():
                             continue
                         if "Sign in" in str(e2) or "cookies" in str(e2).lower():
                             break
                         continue
-        # если ничего не вытянули с форматами, но есть entries — вернем первый с webpage_url чтобы хотя бы попробовать (дальше обработается)
         if entries_sorted:
-            # пробуем вернуть первый entry с детальной инфой без формата (последний шанс)
             first = entries_sorted[0]
             vid = first.get("id")
+            if vid == "vVQXkBDbG1E" and len(entries_sorted) > 1:
+                first = entries_sorted[1]
+                vid = first.get("id")
             url = first.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
             if url:
                 try:
-                    with yt_dlp.YoutubeDL({**ydl_opts_base, "extractor_args": {"youtube": {"player_client": ["web"]}}}) as ydl:
+                    with yt_dlp.YoutubeDL({**ydl_opts_base, "extractor_args": {"youtube": {"player_client": ["android"]}}}) as ydl:
                         detail = ydl.extract_info(url, download=False)
                         best = _pick_best_url(detail) if detail else None
                         if best:
                             detail["url"] = best
-                        return detail
+                            return detail
                 except Exception as e:
                     last_err = e
         if last_err:
+            # прячем спамный стек youtube в понятное сообщение
+            msg = str(last_err)
+            if "vVQXkBDbG1E" in msg or "Requested format" in msg:
+                raise Exception("YouTube не отдал аудио (SABR/PO-Token). Попробуй другой запрос, например 'Узи включи Фиксики песня', или добавь YT_COOKIES в Railway Variables")
             raise last_err
         return entries_sorted[0] if entries_sorted else None
 
@@ -2335,3 +2371,4 @@ if not config.TOKEN:
     print("❌ DISCORD_TOKEN не найден в .env !")
 else:
     bot.run(config.TOKEN)
+
