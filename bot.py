@@ -362,121 +362,189 @@ async def _music_enqueue(msg: discord.Message, query: str):
         await msg.reply("❌ yt-dlp не установлен на хосте. Добавь в requirements и пересобери.", mention_author=False)
         return
     # YouTube с Railway IP просит куки — пробуем несколько клиентов, + YT_COOKIES если есть
-    base_ydl_opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
-    # готовим набор клиентов для обхода (android обходит Sign in)
-    client_sets = [["android","web"], ["android_music","android"], ["ios","android","web"], ["web"]]
-    # фолбэк форматы если "Requested format is not available"
-    format_tries = ["bestaudio/best", "bestaudio", "best", "bv*+ba/b", None]
+    # FIX для "Requested format is not available" (SABR): сначала extract БЕЗ format, потом ручной выбор аудио из formats
+    base_ydl_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}}
+    client_sets = [["web"], ["android", "web"], ["android_music", "android"], ["ios", "android", "web"], ["mweb"]]
+    # пробуем СНАЧАЛА без ограничения формата (None) — это ключ к фиксу SABR, потом мягкие аудио-форматы
+    format_tries = [None, "bestaudio[ext=m4a]/bestaudio/best", "bestaudio", "best", "worsteverything"]
     import tempfile
     cookies_data = os.getenv("YT_COOKIES", "")
-    ydl_opts = base_ydl_opts.copy()
+    ydl_opts_base = base_ydl_opts.copy()
     if cookies_data and "netscape" in cookies_data.lower():
         try:
             tf = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8")
             tf.write(cookies_data)
             tf.close()
-            ydl_opts["cookiefile"] = tf.name
+            ydl_opts_base["cookiefile"] = tf.name
         except:
             pass
-        # с куками web лучше, но оставляем фолбэки если формат не доступен
-        client_sets = [["web"], ["android","web"], ["android_music","android"], ["ios","android","web"]]
+
+    def _pick_best_url(info):
+        # 1) прямой url выбранный yt-dlp
+        if info.get("url"):
+            return info["url"]
+        # 2) requested_formats (когда format = bv+ba)
+        if info.get("requested_formats"):
+            for f in info["requested_formats"]:
+                if f.get("url") and f.get("acodec") != "none":
+                    return f["url"]
+            for f in info["requested_formats"]:
+                if f.get("url"):
+                    return f["url"]
+        # 3) formats — вручную выбираем лучший аудио
+        fmts = [f for f in (info.get("formats") or []) if f.get("url")]
+        if not fmts:
+            return None
+        audio = [f for f in fmts if f.get("acodec") not in (None, "none")]
+        # сортируем по качеству аудио (abr/tbr/quality)
+        def _score(f):
+            return (f.get("abr") or 0, f.get("tbr") or 0, f.get("height") or 0, f.get("quality") or 0)
+        if audio:
+            try:
+                audio_sorted = sorted(audio, key=_score, reverse=True)
+                return audio_sorted[0]["url"]
+            except:
+                return audio[-1]["url"]
+        try:
+            fmts_sorted = sorted(fmts, key=_score, reverse=True)
+            return fmts_sorted[0]["url"]
+        except:
+            return fmts[-1]["url"]
+
     loop = asyncio.get_event_loop()
     def _extract():
         last_err = None
-        # для поиска сначала получаем результаты без ограничения формата — иначе ytsearch падает на "Requested format is not available"
-        def _get_search_entries(ydl):
-            try:
-                search = ydl.extract_info(f"ytsearch5:{query}", download=False)
-                return search.get("entries") or []
-            except Exception as e:
-                # даже поиск с форматом мог упасть — пробуем без формата
-                try:
-                    with yt_dlp.YoutubeDL({**ydl_opts, "format": None, "extractor_args": {"youtube": {"player_client": ["web"]}}}) as ydl2:
-                        search = ydl2.extract_info(f"ytsearch5:{query}", download=False)
-                        return search.get("entries") or []
-                except:
-                    raise e
-        for clients in client_sets:
-            for fmt in format_tries:
-                opts = ydl_opts.copy()
-                opts["extractor_args"] = {"youtube": {"player_client": clients}}
-                if fmt is None:
-                    opts.pop("format", None)
-                else:
-                    opts["format"] = fmt
-                try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        if query.startswith("http"):
+        # если прямая ссылка — пробуем сразу с каждым клиентом/форматом, выбирая url вручную
+        if query.startswith("http"):
+            for clients in client_sets:
+                for fmt in format_tries:
+                    opts = ydl_opts_base.copy()
+                    opts["extractor_args"] = {"youtube": {"player_client": clients, "player_skip": ["js", "configs"]}}
+                    if fmt is None:
+                        opts.pop("format", None)
+                    else:
+                        opts["format"] = fmt
+                    try:
+                        with yt_dlp.YoutubeDL(opts) as ydl:
                             info = ydl.extract_info(query, download=False)
-                            return info
-                        else:
-                            # поиск без формата — чтобы не падать на s7wgU89yGb0
-                            # делаем отдельный YDL без format для поиска
-                            search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
-                            if "cookiefile" in ydl_opts:
-                                search_opts["cookiefile"] = ydl_opts["cookiefile"]
-                            search_opts["extractor_args"] = {"youtube": {"player_client": clients}}
-                            with yt_dlp.YoutubeDL(search_opts) as ydl_search:
-                                try:
-                                    search = ydl_search.extract_info(f"ytsearch5:{query}", download=False)
-                                except Exception as e_search:
-                                    last_err = e_search
-                                    continue
-                                entries = search.get("entries") or []
-                                # фильтр музыки: отсеиваем болтовню типа "ВЕРНУЛИСЬ! НЕУЖЕЛИ 2 СЕЗОН" — ищем OST/music
-                                def _is_music(e):
-                                    t = (e.get("title") or "").lower()
-                                    # если в title есть музыкальные маркеры — точно музыка
-                                    music_kw = ["ost", "music", "song", "soundtrack", "audio", "official", "mv", "m/v", "amv", "nightcore", "cover", "remix", "phonk", "trap", "lofi", "instrumental", "theme", "opening", "ending"]
-                                    if any(k in t for k in music_kw):
-                                        return True
-                                    # для запроса с "дрон" — требуем ost/music в title, иначе это болтовня
-                                    ql = query.lower()
-                                    if "дрон" in ql or "murder" in ql:
-                                        return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"])
-                                    if "грустн" in ql or "atmospheric" in ql or "sad" in ql:
-                                        return True  # грустное — любое пойдет, но лучше с music
-                                    return True  # по умолчанию пропускаем, но сортируем
-                                # сортируем: музыкальные сначала
-                                entries_sorted = sorted(entries, key=lambda e: 0 if _is_music(e) else 1)
-                                for entry in entries_sorted:
-                                    if not entry:
-                                        continue
-                                    vid = entry.get("id")
-                                    url = entry.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None) or entry.get("url")
-                                    if not url:
-                                        continue
-                                    try:
-                                        detail = ydl.extract_info(url, download=False)
-                                        if detail and (detail.get("url") or detail.get("formats")):
-                                            # доп проверка: если это не музыка а болтовня — скипаем
-                                            dt = (detail.get("title") or entry.get("title") or "").lower()
-                                            if ("вернулись" in dt and "сезон" in dt and "murder drones" in dt and "ost" not in dt and "music" not in dt):
-                                                last_err = Exception(f"skip non-music: {dt[:60]}")
-                                                continue
-                                            return detail
-                                    except Exception as e2:
-                                        last_err = e2
-                                        if "Requested format is not available" in str(e2) or "format is not available" in str(e2).lower():
-                                            continue
-                                        continue
-                                if entries_sorted:
-                                    return entries_sorted[0]
+                            url_test = _pick_best_url(info)
+                            if url_test:
+                                info["url"] = url_test
+                                return info
+                            # если url не нашли но info есть — вернём как есть, дальше _pick_best_url добьет
+                            if info.get("formats"):
+                                return info
+                    except Exception as e:
+                        last_err = e
+                        msg = str(e)
+                        if "Requested format is not available" in msg or "format is not available" in msg.lower():
                             continue
+                        if "Sign in" in msg or "cookies" in msg.lower():
+                            break
+                        continue
+            if last_err:
+                raise last_err
+            return None
+
+        # --- поиск по ключевым словам ---
+        # 1) ищем ytsearch5 БЕЗ ограничения формата (иначе падает на некоторых видосах)
+        search_entries = None
+        for clients in client_sets:
+            search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
+            if "cookiefile" in ydl_opts_base:
+                search_opts["cookiefile"] = ydl_opts_base["cookiefile"]
+            search_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            try:
+                with yt_dlp.YoutubeDL(search_opts) as ydl_search:
+                    search = ydl_search.extract_info(f"ytsearch5:{query}", download=False)
+                    entries = search.get("entries") or []
+                    if entries:
+                        search_entries = entries
+                        break
+            except Exception as e:
+                last_err = e
+                continue
+        if not search_entries:
+            if last_err:
+                raise last_err
+            return None
+
+        # фильтр музыки: отсеиваем болтовню типа "ВЕРНУЛИСЬ! НЕУЖЕЛИ 2 СЕЗОН" — ищем OST/music
+        def _is_music(e):
+            t = (e.get("title") or "").lower()
+            music_kw = ["ost", "music", "song", "soundtrack", "audio", "official", "mv", "m/v", "amv", "nightcore", "cover", "remix", "phonk", "trap", "lofi", "instrumental", "theme", "opening", "ending"]
+            if any(k in t for k in music_kw):
+                return True
+            ql = query.lower()
+            if "дрон" in ql or "murder" in ql:
+                return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"])
+            if "грустн" in ql or "atmospheric" in ql or "sad" in ql:
+                return True
+            return True
+        entries_sorted = sorted(search_entries, key=lambda e: 0 if _is_music(e) else 1)
+
+        # 2) для каждого найденного видео пробуем вытянуть форматы — перебираем клиентов и формат-стратегии
+        for entry in entries_sorted:
+            if not entry:
+                continue
+            vid = entry.get("id")
+            url = entry.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None) or entry.get("url")
+            if not url:
+                continue
+            dt = (entry.get("title") or "").lower()
+            if ("вернулись" in dt and "сезон" in dt and "murder drones" in dt and "ost" not in dt and "music" not in dt):
+                continue
+            for clients in client_sets:
+                for fmt in format_tries:
+                    opts = ydl_opts_base.copy()
+                    opts["extractor_args"] = {"youtube": {"player_client": clients, "player_skip": ["js", "configs"]}}
+                    if fmt is None:
+                        opts.pop("format", None)
+                    else:
+                        opts["format"] = fmt
+                    try:
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            detail = ydl.extract_info(url, download=False)
+                            if not detail:
+                                continue
+                            best = _pick_best_url(detail)
+                            if best:
+                                detail["url"] = best
+                                # доп проверка болтовни после детального title
+                                dtitle = (detail.get("title") or dt).lower()
+                                if ("вернулись" in dtitle and "сезон" in dtitle and "murder drones" in dtitle and "ost" not in dtitle and "music" not in dtitle):
+                                    last_err = Exception(f"skip non-music: {dtitle[:60]}")
+                                    continue
+                                return detail
+                            if detail.get("formats"):
+                                return detail
+                    except Exception as e2:
+                        last_err = e2
+                        if "Requested format is not available" in str(e2) or "format is not available" in str(e2).lower():
+                            continue
+                        if "Sign in" in str(e2) or "cookies" in str(e2).lower():
+                            break
+                        continue
+        # если ничего не вытянули с форматами, но есть entries — вернем первый с webpage_url чтобы хотя бы попробовать (дальше обработается)
+        if entries_sorted:
+            # пробуем вернуть первый entry с детальной инфой без формата (последний шанс)
+            first = entries_sorted[0]
+            vid = first.get("id")
+            url = first.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
+            if url:
+                try:
+                    with yt_dlp.YoutubeDL({**ydl_opts_base, "extractor_args": {"youtube": {"player_client": ["web"]}}}) as ydl:
+                        detail = ydl.extract_info(url, download=False)
+                        best = _pick_best_url(detail) if detail else None
+                        if best:
+                            detail["url"] = best
+                        return detail
                 except Exception as e:
                     last_err = e
-                    msg = str(e)
-                    if "Sign in" in msg or "cookies" in msg.lower():
-                        break  # пробуем следующий client_set, не форматы
-                    if "Requested format is not available" in msg or "format is not available" in msg.lower():
-                        continue  # пробуем следующий формат
-                    # для ytsearch — пробуем следующий формат тоже
-                    if "ytsearch" in query.lower() or not query.startswith("http"):
-                        continue
-                    raise
         if last_err:
             raise last_err
-        return None
+        return entries_sorted[0] if entries_sorted else None
+
     try:
         info = await loop.run_in_executor(None, _extract)
     except Exception as e:
@@ -485,15 +553,15 @@ async def _music_enqueue(msg: discord.Message, query: str):
     if not info:
         await msg.reply("❌ Ничего не нашла по запросу.", mention_author=False)
         return
-    # прямой аудио url — если yt-dlp не смог выбрать формат, выбираем лучший аудио вручную
-    url = info.get("url") or info.get("entries", [{}])[0].get("url")
+    # финальный выбор аудио url — уже с фолбэком на ручной пик
+    url = _pick_best_url(info)
+    if not url:
+        url = info.get("url") or (info.get("entries", [{}])[0].get("url") if info.get("entries") else None)
     if not url and info.get("formats"):
         fmts = [f for f in info["formats"] if f.get("url")]
-        # предпочитаем аудио
         audio = [f for f in fmts if f.get("acodec") != "none"]
         pick = None
         if audio:
-            # лучший по abr/tbr
             try:
                 pick = max(audio, key=lambda f: (f.get("abr") or f.get("tbr") or 0))
             except:
@@ -502,10 +570,7 @@ async def _music_enqueue(msg: discord.Message, query: str):
             pick = fmts[-1] if fmts else None
         url = pick.get("url") if pick else None
     if not url:
-        # пробуем взять webpage fallback
-        url = info.get("webpage_url") or query
-        # если это веб-страница — не сыграет, сообщаем
-        await msg.reply(f"❌ Не смогла вытащить аудио. Попробуй прямую ссылку на YouTube.", mention_author=False)
+        await msg.reply(f"❌ Не смогла вытащить аудио (формат недоступен). Попробуй другой запрос или прямую ссылку. Если на Railway — добавь YT_COOKIES в Variables.", mention_author=False)
         return
     title = info.get("title", query)[:150]
     item = {"url": url, "title": title, "requester": msg.author.mention, "channel_id": msg.channel.id, "webpage": info.get("webpage_url", "")}
