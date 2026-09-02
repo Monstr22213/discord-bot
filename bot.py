@@ -15,6 +15,21 @@ import urllib.parse as urlparse
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# прогрев opus — иначе FFmpeg виснет и "has not terminated" в логах 17:28
+try:
+    import discord.opus
+    if not discord.opus.is_loaded():
+        try:
+            discord.opus.load_opus("libopus.so.0")
+        except:
+            try:
+                discord.opus.load_opus("opus")
+            except:
+                pass
+    print(f"opus loaded: {discord.opus.is_loaded()}")
+except Exception as e:
+    print(f"opus load fail: {e}")
+
 # ============ AI CHAT (OpenRouter / OpenAI-compatible) ============
 def _cfg(key, default):
     if hasattr(config, key):
@@ -259,8 +274,8 @@ _music_bass: dict[int, bool] = defaultdict(bool)  # guild_id -> bass boost вк�
 _music_cmd_cooldown: dict[tuple, float] = {}  # (guild_id, user_id, cmd) -> last_ts
 _processed_music_ids: set[int] = set()  # анти-дубль если Railway поднял 2 контейнера/эвент дублируется
 
-FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000"}
-FFMPEG_BASS_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000 -af bass=g=10:frequency=110:width=0.6,volume=1.2"}
+FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 128K -analyzeduration 0 -rw_timeout 15000000", "options": "-vn -b:a 128k -ar 48000 -loglevel warning"}
+FFMPEG_BASS_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 128K -analyzeduration 0 -rw_timeout 15000000", "options": "-vn -b:a 128k -ar 48000 -af bass=g=6:frequency=110:width=0.6 -loglevel warning"}
 
 def _check_voice_permission(msg: discord.Message) -> bool:
     """Проверка: автор в том же войсе что и бот. Если нет — возвращаем False (отправлять reply должен вызыватель)."""
@@ -280,7 +295,6 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
         await msg.reply("🚁 Зайди сначала в голосовой канал, брат! *хик* — я не знаю куда лететь.", mention_author=False)
         return False
     channel = msg.author.voice.channel
-    # проверка прав бота на Connect/Speak
     try:
         perms = channel.permissions_for(msg.guild.me)
         if not perms.connect or not perms.speak:
@@ -289,6 +303,14 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
     except:
         pass
     vc = msg.guild.voice_client
+    # если висит зомби-клиент (как в логе 17:28 handshake terminated + ffmpeg has not terminated) — форс-дисконнект
+    if vc and not vc.is_connected():
+        try:
+            await vc.disconnect(force=True)
+            await asyncio.sleep(1)
+        except:
+            pass
+        vc = msg.guild.voice_client
     try:
         if vc and vc.is_connected():
             if vc.channel.id == channel.id:
@@ -300,12 +322,32 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
                 if "Already connected" in str(e):
                     return True
                 print(f"_music_join move_to fail: {type(e).__name__}: {e}")
-                raise
+                # если move_to рвет хендшейк — пересоздаем
+                try:
+                    await vc.disconnect(force=True)
+                    await asyncio.sleep(1)
+                    await channel.connect(self_deaf=False, timeout=15, reconnect=True)
+                    return True
+                except Exception as e2:
+                    print(f"_music_join move_to retry fail: {e2}")
+                    raise e2
         else:
+            # если уже есть неконнектящийся vc — убиваем
+            if vc:
+                try:
+                    await vc.disconnect(force=True)
+                    await asyncio.sleep(1)
+                except:
+                    pass
             try:
-                # таймаут 15с чтобы не висеть как в логах 17:08:54 Timed out
                 await channel.connect(self_deaf=False, timeout=15, reconnect=True)
-                return True
+                # ждем stable коннекта 1с — иначе сразу play рвет хендшейк как в логе 17:28:00
+                await asyncio.sleep(1)
+                vc2 = msg.guild.voice_client
+                if vc2 and vc2.is_connected():
+                    return True
+                print(f"_music_join: after connect still not connected")
+                return False
             except Exception as e:
                 if "Already connected" in str(e):
                     return True
@@ -315,12 +357,11 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
         if "Already connected" in str(e):
             return True
         err = str(e).strip() or type(e).__name__
-        # частые причины: Timeout, 4003/4014, нет прав, канал фулл
         details = err
         if "403" in err or "Forbidden" in err:
             details += " (нет прав Connect/Speak)"
-        if "timed out" in err.lower() or "timeout" in err.lower():
-            details += " (таймаут войса — попробуй ещё раз, Discord лагает; Endpoint c-sin19... должен появиться в логах)"
+        if "timed out" in err.lower() or "timeout" in err.lower() or "handshake" in err.lower():
+            details += " (таймаут войса — Discord UDP лагает, попробуй ещё раз через 5с; если повторяется — перезайди в канал `Пещера из трупиков`)"
         print(f"_music_join final fail: {details}")
         await msg.reply(f"❌ Не смогла зайти в <#{channel.id}>: {details}", mention_author=False)
         return False
@@ -338,32 +379,66 @@ async def _music_leave(msg: discord.Message):
 def _music_play_next(guild: discord.Guild):
     q = _music_queues[guild.id]
     vc = guild.voice_client
-    if not vc or not q:
+    if not vc or not vc.is_connected():
+        print(f"music play_next: vc not connected guild={guild.id}")
+        _now_playing.pop(guild.id, None)
+        # пробуем вернуть трек в очередь чтобы не потерять
+        return
+    if not q:
         _now_playing.pop(guild.id, None)
         return
     item = q.popleft()
     _now_playing[guild.id] = item
+    # валидация URL
+    url = item.get("url", "")
+    if not url or not url.startswith("http"):
+        print(f"music play_next: bad url for '{item.get('title')}' url={url[:120]}")
+        ch_id = item.get("channel_id")
+        if ch_id:
+            ch = bot.get_channel(ch_id)
+            if ch:
+                bot.loop.create_task(ch.send(f"❌ Не смог запустить **{item['title']}** — битая ссылка. Пробую следующий..."))
+        bot.loop.call_soon_threadsafe(lambda: _music_play_next(guild))
+        return
     try:
-        # yt-dlp уже дал прямой url — PCMVolumeTransformer требует PCM источник, поэтому FFmpegPCMAudio
         use_bass = _music_bass.get(guild.id, False)
         opts = FFMPEG_BASS_OPTIONS if use_bass else FFMPEG_OPTIONS
-        base_source = discord.FFmpegPCMAudio(item["url"], **opts)
+        print(f"music play_next: FFmpeg {item['title'][:60]} url={url[:80]}... bass={use_bass} vol={_music_volume.get(guild.id,0.5)}")
+        try:
+            base_source = discord.FFmpegPCMAudio(url, **opts)
+        except Exception as e_ff:
+            print(f"music FFmpegPCMAudio fail: {e_ff} — пробую без bass")
+            base_source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
         vol = _music_volume.get(guild.id, 0.5)
         source = discord.PCMVolumeTransformer(base_source, volume=vol)
         def after(err):
             if err:
                 print(f"music after error: {err}")
-            # следующий трек в loop
+                # уведомить в чат если ошибка воспроизведения
+                ch_id2 = item.get("channel_id")
+                if ch_id2:
+                    ch2 = bot.get_channel(ch_id2)
+                    if ch2:
+                        bot.loop.create_task(ch2.send(f"⚠️ Ошибка воспроизведения **{item['title']}**: {err} → скипаю"))
             bot.loop.call_soon_threadsafe(lambda: _music_play_next(guild))
+        # если уже что-то играет — стопаем
+        if vc.is_playing() or vc.is_paused():
+            try: vc.stop()
+            except: pass
         vc.play(source, after=after)
-        # анонс в текстовый канал кэшируем
         ch_id = item.get("channel_id")
         if ch_id:
             ch = bot.get_channel(ch_id)
             if ch:
                 bot.loop.create_task(ch.send(f"🎧 Сейчас играет: **{item['title']}** — заказал {item['requester']}"))
     except Exception as e:
-        print(f"music play_next fail: {e}")
+        print(f"music play_next fail: {type(e).__name__}: {e}")
+        ch_id = item.get("channel_id")
+        if ch_id:
+            ch = bot.get_channel(ch_id)
+            if ch:
+                bot.loop.create_task(ch.send(f"❌ Ошибка запуска **{item['title']}**: {e}"))
+        _now_playing.pop(guild.id, None)
         bot.loop.call_soon_threadsafe(lambda: _music_play_next(guild))
 
 async def _music_enqueue(msg: discord.Message, query: str):
