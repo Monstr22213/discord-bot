@@ -274,8 +274,8 @@ _music_bass: dict[int, bool] = defaultdict(bool)  # guild_id -> bass boost вк�
 _music_cmd_cooldown: dict[tuple, float] = {}  # (guild_id, user_id, cmd) -> last_ts
 _processed_music_ids: set[int] = set()  # анти-дубль если Railway поднял 2 контейнера/эвент дублируется
 
-FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 128K -analyzeduration 0 -rw_timeout 15000000", "options": "-vn -b:a 128k -ar 48000 -loglevel warning"}
-FFMPEG_BASS_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 128K -analyzeduration 0 -rw_timeout 15000000", "options": "-vn -b:a 128k -ar 48000 -af bass=g=6:frequency=110:width=0.6 -loglevel warning"}
+FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_at_eof 1 -rw_timeout 15000000 -probesize 32K -analyzeduration 0 -protocol_whitelist file,http,https,tcp,tls,crypto", "options": "-vn -c:a pcm_s16le -ar 48000 -ac 2 -loglevel warning"}
+FFMPEG_BASS_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_at_eof 1 -rw_timeout 15000000 -probesize 32K -analyzeduration 0 -protocol_whitelist file,http,https,tcp,tls,crypto", "options": "-vn -c:a pcm_s16le -ar 48000 -ac 2 -af bass=g=6:frequency=110:width=0.6 -loglevel warning"}
 
 def _check_voice_permission(msg: discord.Message) -> bool:
     """Проверка: автор в том же войсе что и бот. Если нет — возвращаем False (отправлять reply должен вызыватель)."""
@@ -753,36 +753,49 @@ async def _music_enqueue(msg: discord.Message, query: str):
         search_queries = [query + " OST music", query + " песня", query]
 
     def _pick_best_url(info):
-        # 1) прямой url выбранный yt-dlp
-        if info.get("url"):
-            return info["url"]
+        # 1) прямой url выбранный yt-dlp — но проверяем что это не веб-страница
+        direct = info.get("url")
+        if direct and direct.startswith("http") and "youtube.com/watch" not in direct and "youtu.be/" not in direct:
+            # если это googlevideo или m3u8 — ок
+            if "googlevideo" in direct or "manifest.googlevideo" in direct or direct.endswith((".m4a",".mp3",".webm",".opus",".m3u8")) or "mime=audio" in direct:
+                return direct
         # 2) requested_formats (когда format = bv+ba)
         if info.get("requested_formats"):
+            # приоритет чисто аудио
             for f in info["requested_formats"]:
-                if f.get("url") and f.get("acodec") != "none":
+                if f.get("url") and f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none"):
+                    if f["url"].startswith("http"):
+                        return f["url"]
+            for f in info["requested_formats"]:
+                if f.get("url") and f.get("acodec") not in (None, "none"):
                     return f["url"]
             for f in info["requested_formats"]:
                 if f.get("url"):
                     return f["url"]
-        # 3) formats — вручную выбираем лучший аудио
-        fmts = [f for f in (info.get("formats") or []) if f.get("url")]
+        # 3) formats — вручную выбираем лучший аудио, избегаем HLS если есть прямой
+        fmts = [f for f in (info.get("formats") or []) if f.get("url") and f["url"].startswith("http")]
         if not fmts:
-            return None
+            return direct if direct and direct.startswith("http") else None
+        # отделяем HLS
         audio = [f for f in fmts if f.get("acodec") not in (None, "none")]
-        # сортируем по качеству аудио (abr/tbr/quality)
+        # предпочитаем не-hls (googlevideo direct) над hls (m3u8)
+        direct_audio = [f for f in audio if "manifest.googlevideo" not in f["url"] and ".m3u8" not in f["url"]]
+        pick_pool = direct_audio if direct_audio else audio
+        if not pick_pool:
+            pick_pool = fmts
+        # приоритет m4a/opus/webm аудио, избегаем video+audio миксы
+        pure_audio = [f for f in pick_pool if f.get("vcodec") in (None, "none")]
+        if pure_audio:
+            pick_pool = pure_audio
         def _score(f):
-            return (f.get("abr") or 0, f.get("tbr") or 0, f.get("height") or 0, f.get("quality") or 0)
-        if audio:
-            try:
-                audio_sorted = sorted(audio, key=_score, reverse=True)
-                return audio_sorted[0]["url"]
-            except:
-                return audio[-1]["url"]
+            # opus/m4a выше, выше abr
+            ext_bonus = 10 if f.get("ext") in ("m4a","opus","webm") else 0
+            return (ext_bonus, f.get("abr") or 0, f.get("tbr") or 0, f.get("acodec") != "none", f.get("height") or 0)
         try:
-            fmts_sorted = sorted(fmts, key=_score, reverse=True)
-            return fmts_sorted[0]["url"]
+            pick_pool_sorted = sorted(pick_pool, key=_score, reverse=True)
+            return pick_pool_sorted[0]["url"]
         except:
-            return fmts[-1]["url"]
+            return pick_pool[-1]["url"]
 
     # сразу показываем что ищем — чтобы не казалось что зависло
     status_msg = None
