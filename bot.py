@@ -607,8 +607,12 @@ async def _stt_start(guild: discord.Guild, text_channel_id: int, duration: int =
         pass
     if not has_key and not has_local:
         return False, "❌ STT не настроен: добавь `OPENAI_API_KEY=sk-...` в Railway Variables (Whisper) или установи `faster-whisper`. Пока добавь ключ — без него распознавания нет."
-    # пробуем разные пути импорта (2.4/2.5/2.6 разные)
+    # пробуем разные пути импорта (py-cord 2.6 имеет sinks, Rapptz discord.py — нет)
     WaveSink = None
+    ver = getattr(__import__('discord'), '__version__', '?')
+    has_sinks = __import__('importlib').util.find_spec("discord.sinks") is not None
+    if not has_sinks:
+        return False, f"❌ discord.sinks не доступен: No module named 'discord.sinks' (сейчас discord {ver} — это Rapptz, а нужен py-cord). Сделай Redeploy с Clear cache: Dockerfile теперь форсит py-cord[voice]>=2.6.1"
     try:
         from discord.sinks import WaveSink as _WS
         WaveSink = _WS
@@ -621,7 +625,7 @@ async def _stt_start(guild: discord.Guild, text_channel_id: int, duration: int =
                 from discord.sinks.wave import WaveSink as _WS2
                 WaveSink = _WS2
             except Exception as e3:
-                return False, f"❌ discord.sinks не доступен: {e3} (нужен discord.py[voice]>=2.5.2 + PyNaCl — сделай Redeploy с обновлённым requirements.txt, версия сейчас {getattr(__import__('discord'), '__version__', '?')})"
+                return False, f"❌ discord.sinks импорт упал: {e3} (discord {ver})"
     try:
         sink = WaveSink()
         vc.start_recording(sink, lambda s: _stt_sink_callback(s, guild, text_channel_id), guild)
