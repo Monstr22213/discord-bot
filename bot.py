@@ -278,6 +278,14 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
         await msg.reply("🚁 Зайди сначала в голосовой канал, брат! *хик* — я не знаю куда лететь.", mention_author=False)
         return False
     channel = msg.author.voice.channel
+    # проверка прав бота на Connect/Speak
+    try:
+        perms = channel.permissions_for(msg.guild.me)
+        if not perms.connect or not perms.speak:
+            await msg.reply("❌ Нет прав зайти в войс: нужен `Connect` + `Speak` для моей роли на этом канале.", mention_author=False)
+            return False
+    except:
+        pass
     vc = msg.guild.voice_client
     try:
         if vc and vc.is_connected():
@@ -285,22 +293,34 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
                 return True
             try:
                 await vc.move_to(channel)
+                return True
             except Exception as e:
                 if "Already connected" in str(e):
                     return True
+                print(f"_music_join move_to fail: {type(e).__name__}: {e}")
                 raise
         else:
             try:
-                await channel.connect(self_deaf=False)
+                # таймаут 15с чтобы не висеть как в логах 17:08:54 Timed out
+                await channel.connect(self_deaf=False, timeout=15, reconnect=True)
+                return True
             except Exception as e:
                 if "Already connected" in str(e):
                     return True
+                print(f"_music_join connect fail: {type(e).__name__}: {e}")
                 raise
-        return True
     except Exception as e:
         if "Already connected" in str(e):
             return True
-        await msg.reply(f"❌ Не смогла зайти: {e}", mention_author=False)
+        err = str(e).strip() or type(e).__name__
+        # частые причины: Timeout, 4003/4014, нет прав, канал фулл
+        details = err
+        if "403" in err or "Forbidden" in err:
+            details += " (нет прав Connect/Speak)"
+        if "timed out" in err.lower() or "timeout" in err.lower():
+            details += " (таймаут войса — попробуй ещё раз, Discord лагает; Endpoint c-sin19... должен появиться в логах)"
+        print(f"_music_join final fail: {details}")
+        await msg.reply(f"❌ Не смогла зайти в <#{channel.id}>: {details}", mention_author=False)
         return False
 
 async def _music_leave(msg: discord.Message):
@@ -384,13 +404,16 @@ async def _music_enqueue(msg: discord.Message, query: str):
         except:
             pass
         client_sets = [["web"], ["web", "android"], ["android"], ["ios"], ["tv"]]
-    # если запрос явно "фиксик" — подмешиваем музыкальный маркер чтобы не ловить болтовню/тот самый vVQXkBDbG1E
+    # обогащаем короткие/генитивные запросы чтобы ytsearch находил музыку, а не болтовню
     _ql = query.lower().strip()
+    search_queries = [query]
     if _ql in ("фиксиков", "фиксики", "фикс", "фикси", "fixiki", "fixies") or _ql.startswith("фиксик"):
-        # пробуем более музыкальный поиск первым, оригинальный — вторым
         search_queries = [query + " песня", query + " музыка", query, "Фиксики песенка"]
-    else:
-        search_queries = [query]
+    elif _ql in ("дронов", "дрон", "дроны", "дронов убийц", "дроны убийцы"):
+        search_queries = ["Murder Drones OST", "Murder Drones music", query + " OST", query]
+    elif len(_ql.split()) == 1 and len(_ql) <= 7:
+        # одно короткое слово типа "дронов" — добавляем музыку
+        search_queries = [query + " OST music", query + " песня", query]
 
     def _pick_best_url(info):
         # 1) прямой url выбранный yt-dlp
@@ -438,13 +461,18 @@ async def _music_enqueue(msg: discord.Message, query: str):
                     with yt_dlp.YoutubeDL(search_opts) as ydl_search:
                         search = ydl_search.extract_info(f"ytsearch5:{sq}", download=False)
                         entries = (search.get("entries") or []) if search else []
-                        # фильтруем битые и тот самый проблемный ID который всегда без формата
-                        entries = [e for e in entries if e and e.get("id") != "vVQXkBDbG1E"]
+                        entries = [e for e in entries if e and e.get("id") and e.get("id") != "vVQXkBDbG1E"]
                         if entries:
+                            print(f"ytsearch ok: '{sq}' via {clients} -> {len(entries)} entries")
                             return entries
+                        else:
+                            print(f"ytsearch empty: '{sq}' via {clients}")
                 except Exception as e:
                     last = e
+                    print(f"ytsearch fail: '{sq}' via {clients}: {e}")
                     continue
+        if last:
+            print(f"ytsearch final fail: {last}")
         return None
 
     def _extract():
@@ -484,17 +512,31 @@ async def _music_enqueue(msg: discord.Message, query: str):
 
         search_entries = _search_entries_for(search_queries)
         if not search_entries:
-            # последний шанс: пробуем scsearch (SoundCloud) как фолбэк если youtube полностью отвалился
-            try:
-                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _SilentLogger(), "extract_flat": False, "skip_download": True}) as ydl2:
-                    s = ydl2.extract_info(f"scsearch1:{query}", download=False)
-                    if s and (s.get("url") or s.get("formats")):
-                        return s
-            except:
-                pass
-            if last_err:
-                raise last_err
-            return None
+            # фолбэк 1: пробуем без обогащения, просто исходный запрос через android
+            if search_queries != [query]:
+                search_entries = _search_entries_for([query])
+            if not search_entries:
+                # фолбэк 2: SoundCloud
+                try:
+                    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _SilentLogger(), "extract_flat": False, "skip_download": True}) as ydl2:
+                        s = ydl2.extract_info(f"scsearch1:{query}", download=False)
+                        entries_sc = []
+                        if s:
+                            if s.get("entries"):
+                                entries_sc = [e for e in s.get("entries") if e]
+                            elif s.get("url") or s.get("formats"):
+                                return s
+                        if entries_sc:
+                            search_entries = entries_sc
+                        else:
+                            print(f"scsearch empty for '{query}'")
+                except Exception as e_sc:
+                    print(f"scsearch fail: {e_sc}")
+            if not search_entries:
+                if last_err:
+                    print(f"search final fail raise: {last_err}")
+                    raise last_err
+                raise Exception(f"Ничего не нашлось по '{query}' (ytsearch вернул 0). Попробуй 'Узи включи {query} OST' или кинь прямую ссылку YouTube")
 
         def _is_music(e):
             t = (e.get("title") or "").lower()
@@ -502,15 +544,18 @@ async def _music_enqueue(msg: discord.Message, query: str):
             if any(k in t for k in music_kw):
                 return True
             ql = query.lower()
+            # смягчаем фильтр: для дронов/фиксиков не отсеиваем жестко, только сортируем
             if "дрон" in ql or "murder" in ql:
-                return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"])
+                # если есть хоть что-то музыкальное — приоритет, иначе всё равно ок (чтобы не было "Ничего не нашла")
+                return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"]) or True
             if "грустн" in ql or "atmospheric" in ql or "sad" in ql:
                 return True
             if "фиксик" in ql:
-                # для фиксиков требуем песню/музыку в названии
-                return any(k in t for k in ["песн", "музык", "song", "music", "караоке", "сборник"])
+                return any(k in t for k in ["песн", "музык", "song", "music", "караоке", "сборник"]) or True
             return True
         entries_sorted = sorted(search_entries, key=lambda e: 0 if _is_music(e) else 1)
+        # смещаем проблемный vVQXkBDbG1E вниз, даже если он музыкальный
+        entries_sorted = sorted(entries_sorted, key=lambda e: 1 if e.get("id")=="vVQXkBDbG1E" else 0)
 
         for entry in entries_sorted:
             if not entry:
