@@ -2316,7 +2316,11 @@ def _start_panel():
                 from panel import app as panel_app
                 port = int(os.getenv("PORT", "8080"))
                 print(f"[Panel] старт на 0.0.0.0:{port}")
-                panel_app.run(host="0.0.0.0", port=port, use_reloader=False)
+                try:
+                    from waitress import serve
+                    serve(panel_app, host="0.0.0.0", port=port, threads=4)
+                except ImportError:
+                    panel_app.run(host="0.0.0.0", port=port, use_reloader=False)
             except Exception as e:
                 print(f"[Panel] fail: {e}")
         t = Thread(target=run, daemon=True)

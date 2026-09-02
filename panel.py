@@ -211,4 +211,8 @@ def save():
 
 if __name__=="__main__":
     port=int(os.getenv("PORT","8080"))
-    app.run(host="0.0.0.0", port=port)
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port, threads=4)
+    except ImportError:
+        app.run(host="0.0.0.0", port=port)
