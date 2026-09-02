@@ -326,7 +326,11 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
                 try:
                     await vc.disconnect(force=True)
                     await asyncio.sleep(1)
-                    await channel.connect(self_deaf=False, timeout=15, reconnect=True)
+                    try:
+                        from discord.ext import voice_recv
+                        await channel.connect(self_deaf=False, timeout=15, reconnect=True, cls=voice_recv.VoiceRecvClient)
+                    except Exception:
+                        await channel.connect(self_deaf=False, timeout=15, reconnect=True)
                     return True
                 except Exception as e2:
                     print(f"_music_join move_to retry fail: {e2}")
@@ -340,7 +344,12 @@ async def _music_join(msg: discord.Message, silent: bool = False) -> bool:
                 except:
                     pass
             try:
-                await channel.connect(self_deaf=False, timeout=15, reconnect=True)
+                # если STT нужен — коннектим с VoiceRecvClient чтобы можно было слушать
+                try:
+                    from discord.ext import voice_recv
+                    vc_new = await channel.connect(self_deaf=False, timeout=15, reconnect=True, cls=voice_recv.VoiceRecvClient)
+                except Exception:
+                    vc_new = await channel.connect(self_deaf=False, timeout=15, reconnect=True)
                 # ждем stable коннекта 1с — иначе сразу play рвет хендшейк как в логе 17:28:00
                 await asyncio.sleep(1)
                 vc2 = msg.guild.voice_client
@@ -607,35 +616,46 @@ async def _stt_start(guild: discord.Guild, text_channel_id: int, duration: int =
         pass
     if not has_key and not has_local:
         return False, "❌ STT не настроен: добавь `OPENAI_API_KEY=sk-...` в Railway Variables (Whisper) или установи `faster-whisper`. Пока добавь ключ — без него распознавания нет."
-    # пробуем разные пути импорта (py-cord 2.6 имеет sinks, Rapptz discord.py — нет)
-    WaveSink = None
-    ver = getattr(__import__('discord'), '__version__', '?')
-    has_sinks = __import__('importlib').util.find_spec("discord.sinks") is not None
-    if not has_sinks:
-        return False, f"❌ discord.sinks не доступен: No module named 'discord.sinks' (сейчас discord {ver} — это Rapptz, а нужен py-cord). Сделай Redeploy с Clear cache: Dockerfile теперь форсит py-cord[voice]>=2.6.1"
+    # используем discord-ext-voice-recv (работает с Rapptz discord.py, без py-cord)
     try:
-        from discord.sinks import WaveSink as _WS
-        WaveSink = _WS
-    except Exception as e1:
+        from discord.ext import voice_recv
+        has_voice_recv = True
+    except Exception as e:
+        return False, f"❌ voice_recv не установлен: {e} (нужен pip install discord-ext-voice-recv — сделай Redeploy)"
+    # проверяем что бот подключен через VoiceRecvClient
+    if not isinstance(vc, voice_recv.VoiceRecvClient):
+        return False, "❌ Бот не в режиме прослушки. Сделай `Узи ливни` → `Узи зайди` заново (подключит с voice_recv), потом `Узи слушай 20`"
+    try:
+        sink = voice_recv.WaveSink()
+        # voice_recv API: vc.listen(sink) / vc.stop_listening() — но также есть start_recording для совместимости
         try:
-            import discord.sinks
-            WaveSink = discord.sinks.WaveSink
-        except Exception as e2:
-            try:
-                from discord.sinks.wave import WaveSink as _WS2
-                WaveSink = _WS2
-            except Exception as e3:
-                return False, f"❌ discord.sinks импорт упал: {e3} (discord {ver})"
-    try:
-        sink = WaveSink()
-        vc.start_recording(sink, lambda s: _stt_sink_callback(s, guild, text_channel_id), guild)
+            vc.listen(sink)
+        except AttributeError:
+            vc.start_recording(sink, lambda s: _stt_sink_callback(s, guild, text_channel_id), guild)
+            # для voice_recv fallback уже в callback
+            _stt_listening[guild.id] = True
+            async def _auto_stop1():
+                await asyncio.sleep(duration)
+                if _stt_listening.get(guild.id):
+                    await _stt_stop(guild)
+            bot.loop.create_task(_auto_stop1())
+            return True, f"🎤 Слушаю {duration}с — говори в микрофон! (язык {config.STT_LANGUAGE})"
+        # для voice_recv.WaveSink нужно ждать и потом вызывать callback вручную
         _stt_listening[guild.id] = True
-        # авто-стоп через duration
-        async def _auto_stop():
+        async def _auto_stop2():
             await asyncio.sleep(duration)
             if _stt_listening.get(guild.id):
-                await _stt_stop(guild)
-        bot.loop.create_task(_auto_stop())
+                try:
+                    vc.stop_listening()
+                except:
+                    try:
+                        vc.stop_recording()
+                    except:
+                        pass
+                # симулируем callback
+                _stt_sink_callback(sink, guild, text_channel_id)
+                _stt_listening.pop(guild.id, None)
+        bot.loop.create_task(_auto_stop2())
         return True, f"🎤 Слушаю {duration}с — говори в микрофон! (язык {config.STT_LANGUAGE})"
     except Exception as e:
         return False, f"❌ Не смогла начать запись: {e}"
@@ -645,7 +665,11 @@ async def _stt_stop(guild: discord.Guild):
     if not vc:
         return False
     try:
-        vc.stop_recording()
+        # пробуем оба API (voice_recv vs sinks)
+        try:
+            vc.stop_listening()
+        except:
+            vc.stop_recording()
     except Exception as e:
         print(f"stt stop fail: {e}")
     _stt_listening.pop(guild.id, None)
