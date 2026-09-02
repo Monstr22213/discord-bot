@@ -607,10 +607,21 @@ async def _stt_start(guild: discord.Guild, text_channel_id: int, duration: int =
         pass
     if not has_key and not has_local:
         return False, "❌ STT не настроен: добавь `OPENAI_API_KEY=sk-...` в Railway Variables (Whisper) или установи `faster-whisper`. Пока добавь ключ — без него распознавания нет."
+    # пробуем разные пути импорта (2.4/2.5/2.6 разные)
+    WaveSink = None
     try:
-        from discord.sinks import WaveSink
-    except Exception as e:
-        return False, f"❌ discord.sinks не доступен: {e} (нужен discord.py[voice]>=2.4 + PyNaCl)"
+        from discord.sinks import WaveSink as _WS
+        WaveSink = _WS
+    except Exception as e1:
+        try:
+            import discord.sinks
+            WaveSink = discord.sinks.WaveSink
+        except Exception as e2:
+            try:
+                from discord.sinks.wave import WaveSink as _WS2
+                WaveSink = _WS2
+            except Exception as e3:
+                return False, f"❌ discord.sinks не доступен: {e3} (нужен discord.py[voice]>=2.5.2 + PyNaCl — сделай Redeploy с обновлённым requirements.txt, версия сейчас {getattr(__import__('discord'), '__version__', '?')})"
     try:
         sink = WaveSink()
         vc.start_recording(sink, lambda s: _stt_sink_callback(s, guild, text_channel_id), guild)
