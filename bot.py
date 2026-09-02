@@ -256,6 +256,8 @@ _music_queues: dict[int, deque] = defaultdict(deque)  # guild_id -> deque of {ur
 _now_playing: dict[int, dict] = {}
 _music_volume: dict[int, float] = defaultdict(lambda: 0.5)  # guild_id -> 0.0-2.0 (50% по дефолту)
 _music_bass: dict[int, bool] = defaultdict(bool)  # guild_id -> bass boost вкл/выкл
+_music_cmd_cooldown: dict[tuple, float] = {}  # (guild_id, user_id, cmd) -> last_ts
+_processed_music_ids: set[int] = set()  # анти-дубль если Railway поднял 2 контейнера/эвент дублируется
 
 FFMPEG_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000"}
 FFMPEG_BASS_OPTIONS = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200K -analyzeduration 0", "options": "-vn -b:a 128k -ar 48000 -af bass=g=10:frequency=110:width=0.6,volume=1.2"}
@@ -389,10 +391,10 @@ async def _music_enqueue(msg: discord.Message, query: str):
         def warning(self, msg): pass
         def error(self, msg): pass
         def info(self, msg): pass
-    base_ydl_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "ignoreerrors": False, "ignore_no_formats_error": True, "logger": _SilentLogger(), "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "retries": 1, "fragment_retries": 1, "extractor_retries": 0, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}}
-    # приоритет android/ios — они обходят PO-Token/SABR, web — fallback с куками
-    client_sets = [["android"], ["android_music"], ["ios"], ["web"], ["mweb"], ["tv"], ["android", "web"]]
-    format_tries = [None, "bestaudio[ext=m4a]/bestaudio/best", "bestaudio", "best", "worst"]
+    base_ydl_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "ignoreerrors": False, "ignore_no_formats_error": True, "logger": _SilentLogger(), "default_search": "ytsearch1", "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "retries": 1, "fragment_retries": 1, "extractor_retries": 0, "socket_timeout": 10, "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}}
+    # было 7 клиентов ×5 форматов = 35 на каждый видос → тормоза 30-60с. Теперь быстро: 2 клиента ×2 формата
+    client_sets = [["android"], ["web"]]
+    format_tries = [None, "bestaudio/best"]
     cookies_data = os.getenv("YT_COOKIES", "")
     ydl_opts_base = base_ydl_opts.copy()
     if cookies_data and "netscape" in cookies_data.lower():
@@ -403,7 +405,7 @@ async def _music_enqueue(msg: discord.Message, query: str):
             ydl_opts_base["cookiefile"] = tf.name
         except:
             pass
-        client_sets = [["web"], ["web", "android"], ["android"], ["ios"], ["tv"]]
+        client_sets = [["web"], ["android"]]
     # обогащаем короткие/генитивные запросы чтобы ytsearch находил музыку, а не болтовню
     _ql = query.lower().strip()
     search_queries = [query]
@@ -447,13 +449,18 @@ async def _music_enqueue(msg: discord.Message, query: str):
         except:
             return fmts[-1]["url"]
 
+    # сразу показываем что ищем — чтобы не казалось что зависло
+    status_msg = None
+    try:
+        status_msg = await msg.reply(f"🔍 Ищу `{query}`...", mention_author=False)
+    except:
+        pass
     loop = asyncio.get_event_loop()
-    # хелпер: поиск с ротацией запросов и клиентов
     def _search_entries_for(candidates):
         last = None
         for sq in candidates:
             for clients in client_sets:
-                search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "ignoreerrors": True, "logger": _SilentLogger(), "extract_flat": False, "skip_download": True, "nocheckcertificate": True}
+                search_opts = {"noplaylist": True, "quiet": True, "no_warnings": True, "ignoreerrors": True, "logger": _SilentLogger(), "extract_flat": False, "skip_download": True, "nocheckcertificate": True, "socket_timeout": 10}
                 if "cookiefile" in ydl_opts_base:
                     search_opts["cookiefile"] = ydl_opts_base["cookiefile"]
                 search_opts["extractor_args"] = {"youtube": {"player_client": clients}}
@@ -540,13 +547,15 @@ async def _music_enqueue(msg: discord.Message, query: str):
 
         def _is_music(e):
             t = (e.get("title") or "").lower()
+            # жестко понижаем Roblox/SCP когда ищем дронов — это был баг на скрине
+            ql = query.lower()
+            if ("drone" in ql or "дрон" in ql or "murder" in ql) and ("scp" in t or "roblox" in t):
+                return False
             music_kw = ["ost", "music", "song", "soundtrack", "audio", "official", "mv", "m/v", "amv", "nightcore", "cover", "remix", "phonk", "trap", "lofi", "instrumental", "theme", "opening", "ending", "песн", "музык"]
             if any(k in t for k in music_kw):
                 return True
-            ql = query.lower()
             # смягчаем фильтр: для дронов/фиксиков не отсеиваем жестко, только сортируем
             if "дрон" in ql or "murder" in ql:
-                # если есть хоть что-то музыкальное — приоритет, иначе всё равно ок (чтобы не было "Ничего не нашла")
                 return any(k in t for k in ["ost", "music", "soundtrack", "song", "cover", "remix", "phonk"]) or True
             if "грустн" in ql or "atmospheric" in ql or "sad" in ql:
                 return True
@@ -554,8 +563,8 @@ async def _music_enqueue(msg: discord.Message, query: str):
                 return any(k in t for k in ["песн", "музык", "song", "music", "караоке", "сборник"]) or True
             return True
         entries_sorted = sorted(search_entries, key=lambda e: 0 if _is_music(e) else 1)
-        # смещаем проблемный vVQXkBDbG1E вниз, даже если он музыкальный
-        entries_sorted = sorted(entries_sorted, key=lambda e: 1 if e.get("id")=="vVQXkBDbG1E" else 0)
+        # смещаем проблемный vVQXkBDbG1E и Roblox/SCP вниз
+        entries_sorted = sorted(entries_sorted, key=lambda e: (1 if e.get("id")=="vVQXkBDbG1E" else 0, 1 if "scp" in (e.get("title") or "").lower() or "roblox" in (e.get("title") or "").lower() else 0))
 
         for entry in entries_sorted:
             if not entry:
@@ -627,12 +636,25 @@ async def _music_enqueue(msg: discord.Message, query: str):
         return entries_sorted[0] if entries_sorted else None
 
     try:
-        info = await loop.run_in_executor(None, _extract)
+        # таймаут 20с на весь extract чтобы не висеть минуту как на скрине
+        info = await asyncio.wait_for(loop.run_in_executor(None, _extract), timeout=20)
+    except asyncio.TimeoutError:
+        try:
+            if status_msg: await status_msg.edit(content="❌ Долго ищет — YouTube тормозит. Попробуй короче: `Узи включи фиксики песня` или кинь ссылку.")
+            else: await msg.reply("❌ Таймаут поиска (20с). Попробуй другой запрос.", mention_author=False)
+        except: pass
+        return
     except Exception as e:
-        await msg.reply(f"❌ Не нашла: {e}", mention_author=False)
+        try:
+            if status_msg: await status_msg.edit(content=f"❌ Не нашла: {e}")
+            else: await msg.reply(f"❌ Не нашла: {e}", mention_author=False)
+        except: pass
         return
     if not info:
-        await msg.reply("❌ Ничего не нашла по запросу.", mention_author=False)
+        try:
+            if status_msg: await status_msg.edit(content="❌ Ничего не нашла по запросу.")
+            else: await msg.reply("❌ Ничего не нашла по запросу.", mention_author=False)
+        except: pass
         return
     # финальный выбор аудио url — уже с фолбэком на ручной пик
     url = _pick_best_url(info)
@@ -651,12 +673,19 @@ async def _music_enqueue(msg: discord.Message, query: str):
             pick = fmts[-1] if fmts else None
         url = pick.get("url") if pick else None
     if not url:
-        await msg.reply(f"❌ Не смогла вытащить аудио (формат недоступен). Попробуй другой запрос или прямую ссылку. Если на Railway — добавь YT_COOKIES в Variables.", mention_author=False)
+        try:
+            if status_msg: await status_msg.edit(content="❌ Не смогла вытащить аудио (формат недоступен). Попробуй прямую ссылку.")
+            else: await msg.reply(f"❌ Не смогла вытащить аудио (формат недоступен). Попробуй прямую ссылку.", mention_author=False)
+        except: pass
         return
     title = info.get("title", query)[:150]
     item = {"url": url, "title": title, "requester": msg.author.mention, "channel_id": msg.channel.id, "webpage": info.get("webpage_url", "")}
     _music_queues[msg.guild.id].append(item)
     vc = msg.guild.voice_client
+    # удаляем "Ищу..." и показываем результат
+    try:
+        if status_msg: await status_msg.delete()
+    except: pass
     if vc.is_playing() or vc.is_paused():
         await msg.reply(f"✅ В очередь: **{title}** (#{len(_music_queues[msg.guild.id])})", mention_author=False)
     else:
@@ -667,6 +696,16 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
     """Возвращает True если это музыкальная команда и уже обработана (не надо в AI). Поддерживает Анечка/Узи/Uzi. Только те кто в войсе с ботом могут управлять."""
     if not message.guild or message.author.bot:
         return False
+    # анти-дубль: если тот же message.id уже обрабатывали (два контейнера/двойной on_message) — игнор
+    if message.id in _processed_music_ids:
+        return True
+    _processed_music_ids.add(message.id)
+    if len(_processed_music_ids) > 2000:
+        # чистим старые, оставляем последние 1000
+        try:
+            _processed_music_ids.clear()
+        except:
+            pass
     low = message.content.lower().strip()
     low_clean = re.sub(rf"<@!?{bot.user.id}>" if bot.user else r"<@!?\d+>", "", low).strip() if bot.user else low
     def _start_any(names, *suffixes):
@@ -686,23 +725,78 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
         await _music_join(message, silent=True)
         return True
     if _start_any(names, "выйди", "ливни", "ливнуть", "ливать", "покинь", "уйди", "выйди из войса", "ливни из войса"):
+        # анти-спам: не флудить "Я и так не в войсе" чаще 3 сек на юзера
+        key = (message.guild.id, message.author.id, "leave")
+        now = time.time()
+        if now - _music_cmd_cooldown.get(key, 0) < 3:
+            return True
+        _music_cmd_cooldown[key] = now
         if _voice_denied():
             await message.reply("🚫 Только те кто в войсе со мной могут выгнать — зайди в мой канал!", mention_author=False)
             return True
+        # если бот уже не в войсе — отвечаем, но с кд выше уже защита от спама
+        if not message.guild.voice_client or not message.guild.voice_client.is_connected():
+            await message.reply("Я и так не в войсе 😅", mention_author=False)
+            return True
         await _music_leave(message)
         return True
-    # умные музыкальные триггеры: "узи включи/поставь/добавь/запусти/в очередь/плей"
+    # умные музыкальные триггеры: "узи включи/поставь/добавь/запусти/в очередь/плей" — теперь с AI-уточнением
     if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["включи","поставь","добавь","запусти","очередь","плей","play"]):
         if _voice_denied():
             await message.reply("🚫 Только те кто в войсе со мной могут ставить музыку — зайди в мой канал!", mention_author=False)
             return True
-        q = re.sub(r"^(?:анечка|узи|uzi)\s+(?:включи|поставь(?:\s+в\s+очередь)?|добавь(?:\s+в\s+очередь)?|запусти|плей|play)\s*", "", message.content, flags=re.I).strip()
-        q = re.sub(r"^(?:в\s+очередь\s*)", "", q, flags=re.I).strip()
-        q = re.sub(rf"<@!?{bot.user.id}>", "", q).strip() if bot.user else q
+        q_raw = re.sub(r"^(?:анечка|узи|uzi)\s+(?:включи|поставь(?:\s+в\s+очередь)?|добавь(?:\s+в\s+очередь)?|запусти|плей|play)\s*", "", message.content, flags=re.I).strip()
+        q_raw = re.sub(r"^(?:в\s+очередь\s*)", "", q_raw, flags=re.I).strip()
+        q_raw = re.sub(rf"<@!?{bot.user.id}>", "", q_raw).strip() if bot.user else q_raw
+        # 1) быстрый эвристический фикс для ветки дронов (без AI, 0мс) — "Ost Drone forever" -> Murder Drones
+        q = q_raw
+        ql = q.lower()
+        if "drone" in ql and "murder" not in ql and "scp" not in ql and "roblox" not in ql:
+            # Ost Drone forever / drone forever / дроны — считаем что хотят Murder Drones
+            q = re.sub(r"(?i)\b(ost\s*)?drones?\b", "Murder Drones", q).strip()
+            if "murder drones" not in q.lower():
+                q = "Murder Drones " + q
+            q = re.sub(r"\s+", " ", q).strip()
+        # 2) AI-уточнение (Opencode Zen) — если настроен, спросим оптимальный YouTube запрос (до 2 сек)
+        api_key = _cfg("AI_API_KEY", "")
+        base_url = _cfg("AI_BASE_URL", "https://opencode.ai/zen/v1/responses")
+        if api_key and "opencode.ai" in base_url and len(q_raw) >= 2:
+            try:
+                import aiohttp
+                payload = {
+                    "model": "muse-spark-1.2-contributor-free",
+                    "instructions": "Ты поисковик музыки. По запросу пользователя верни ОДНОЙ строкой оптимальный YouTube запрос 2-6 слов для ytsearch. Для вселенной Murder Drones всегда добавляй 'Murder Drones'. Для 'Ost Drone forever' -> 'Murder Drones Forever OST'. Для 'фиксики большой секрет' -> 'Фиксики Большой секрет песня'. Для простого 'дронов' -> 'Murder Drones OST'. Если уже точный запрос — верни его как есть. Не добавляй лишнего.",
+                    "input": q_raw,
+                    "temperature": 0.3,
+                    "max_output_tokens": 30
+                }
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(base_url, json=payload, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=2.5)) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            ai_q = None
+                            if data.get("output"):
+                                for out in data["output"]:
+                                    if out.get("content"):
+                                        for c in out["content"]:
+                                            if c.get("text"):
+                                                ai_q = c["text"]
+                                                break
+                                    if ai_q: break
+                            ai_q = (ai_q or data.get("output_text") or "").strip().replace('"','').replace("'","").strip()
+                            if ai_q and 2 <= len(ai_q) <= 80 and len(ai_q.split()) <= 8:
+                                # защита: если AI вернул Roblox/SCP когда просили дронов — игнор
+                                if "drone" in q_raw.lower() and "roblox" in ai_q.lower():
+                                    print(f"AI refine ignored Roblox for drone query: {ai_q}")
+                                else:
+                                    q = ai_q
+                                    print(f"AI refine: '{q_raw}' -> '{q}'")
+            except Exception as e:
+                print(f"AI refine fail: {e}")
         if q and len(q) > 2:
             await _music_enqueue(message, q)
             return True
-        await _music_enqueue(message, q)
+        await _music_enqueue(message, q_raw)
         return True
     if _start_any(names, "стоп", "пауза"):
         if _voice_denied():
