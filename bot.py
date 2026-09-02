@@ -753,10 +753,9 @@ async def _music_enqueue(msg: discord.Message, query: str):
         search_queries = [query + " OST music", query + " песня", query]
 
     def _pick_best_url(info):
-        # 1) прямой url выбранный yt-dlp — но проверяем что это не веб-страница
+        # 1) прямой url выбранный yt-dlp — но проверяем что это не веб-страница/сторборд
         direct = info.get("url")
-        if direct and direct.startswith("http") and "youtube.com/watch" not in direct and "youtu.be/" not in direct:
-            # если это googlevideo или m3u8 — ок
+        if direct and direct.startswith("http") and "youtube.com/watch" not in direct and "youtu.be/" not in direct and "i.ytimg.com" not in direct and "storyboard" not in direct:
             if "googlevideo" in direct or "manifest.googlevideo" in direct or direct.endswith((".m4a",".mp3",".webm",".opus",".m3u8")) or "mime=audio" in direct:
                 return direct
         # 2) requested_formats (когда format = bv+ba)
@@ -772,17 +771,23 @@ async def _music_enqueue(msg: discord.Message, query: str):
             for f in info["requested_formats"]:
                 if f.get("url"):
                     return f["url"]
-        # 3) formats — вручную выбираем лучший аудио, избегаем HLS если есть прямой
-        fmts = [f for f in (info.get("formats") or []) if f.get("url") and f["url"].startswith("http")]
+        # 3) formats — вручную выбираем лучший аудио, избегаем HLS и сторбордов (как в логе 17:48 i.ytimg.com/sb/...L2/M$M.jpg)
+        def _is_bad_url(u: str) -> bool:
+            bad = ("i.ytimg.com" in u or "storyboard" in u or u.endswith(".jpg") or u.endswith(".webp") or "/sb/" in u or "M$M.jpg" in u)
+            return bad
+        fmts = [f for f in (info.get("formats") or []) if f.get("url") and f["url"].startswith("http") and not _is_bad_url(f["url"])]
+        # также режем по protocol mhtml
+        fmts = [f for f in fmts if f.get("protocol") not in ("mhtml",) and f.get("ext") not in ("mhtml",)]
         if not fmts:
-            return direct if direct and direct.startswith("http") else None
+            return direct if direct and direct.startswith("http") and not _is_bad_url(direct) else None
         # отделяем HLS
         audio = [f for f in fmts if f.get("acodec") not in (None, "none")]
         # предпочитаем не-hls (googlevideo direct) над hls (m3u8)
         direct_audio = [f for f in audio if "manifest.googlevideo" not in f["url"] and ".m3u8" not in f["url"]]
         pick_pool = direct_audio if direct_audio else audio
         if not pick_pool:
-            pick_pool = fmts
+            # если осталось только видео+аудио — режем storyboard уже, но не возвращаем jpg
+            pick_pool = [f for f in fmts if not _is_bad_url(f["url"])] or fmts
         # приоритет m4a/opus/webm аудио, избегаем video+audio миксы
         pure_audio = [f for f in pick_pool if f.get("vcodec") in (None, "none")]
         if pure_audio:
