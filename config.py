@@ -41,3 +41,14 @@ AI_TRIGGER_NAMES = [s.strip().lower() for s in AI_TRIGGER_NAMES_RAW.split(",") i
 AI_TRIGGER_ON_REPLY = os.getenv("AI_TRIGGER_ON_REPLY", "true").lower() not in ("0", "false", "no", "off")
 AI_MAX_HISTORY = int(os.getenv("AI_MAX_HISTORY", "25"))  # сколько прошлых сообщений помнить на канал (25 ответов -> очистка)
 AI_COOLDOWN = int(os.getenv("AI_COOLDOWN", "5"))  # сек между ответами одному юзеру
+
+# ============ TTS (edge-tts) ============
+TTS_ENABLED = os.getenv("TTS_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+TTS_VOICE = os.getenv("TTS_VOICE", "ru-RU-SvetlanaNeural")  # ru-RU-SvetlanaNeural / ru-RU-DmitryNeural / en-US-AriaNeural
+TTS_RATE = os.getenv("TTS_RATE", "+5%")  # быстрее чуть как Узи
+TTS_AUTO_VOICE = os.getenv("TTS_AUTO_VOICE", "true").lower() not in ("0", "false", "no", "off")  # авто-озвучка AI-ответов если автор в войсе с ботом
+
+# ============ STT (голос -> текст, Whisper) ============
+STT_ENABLED = os.getenv("STT_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+STT_MODEL = os.getenv("STT_MODEL", "whisper-1")  # whisper-1 (OpenAI API) — нужен OPENAI_API_KEY
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru")

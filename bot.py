@@ -373,8 +373,268 @@ async def _music_leave(msg: discord.Message):
         return
     _music_queues[msg.guild.id].clear()
     _now_playing.pop(msg.guild.id, None)
+    # чистим TTS очередь тоже
+    try:
+        _tts_queues[guild.id].clear()
+    except:
+        pass
     await vc.disconnect()
     await msg.reply("🚁 *улетаю*... пока, котик! 💋", mention_author=False)
+
+# ============ TTS (edge-tts) — синтезатор речи Узи ============
+_tts_queues: dict[int, deque] = defaultdict(deque)  # guild_id -> deque of {path, text, channel_id}
+_tts_playing: dict[int, bool] = {}
+import tempfile as _tts_tempfile
+
+def _tts_clean(text: str) -> str:
+    # убираем *действия*, эмодзи, глитчи — для озвучки
+    t = re.sub(r"\*.*?\*", "", text)
+    t = re.sub(r"//.*?//", "", t)
+    t = re.sub(r"[◉💜💀🔫🤖]+", "", t)
+    t = re.sub(r"https?://\S+", "", t)
+    t = re.sub(r"<@!?\d+>", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) > 350:
+        t = t[:350] + "…"
+    return t
+
+def _tts_play_next(guild: discord.Guild):
+    q = _tts_queues[guild.id]
+    vc = guild.voice_client
+    if not vc or not vc.is_connected():
+        _tts_playing.pop(guild.id, None)
+        return
+    if not q:
+        _tts_playing.pop(guild.id, None)
+        # если музыка ждала — продолжить
+        if _music_queues[guild.id] and not vc.is_playing():
+            _music_play_next(guild)
+        return
+    item = q.popleft()
+    _tts_playing[guild.id] = True
+    path = item.get("path")
+    if not path or not os.path.exists(path):
+        print(f"tts play_next: bad path {path}")
+        bot.loop.call_soon_threadsafe(lambda: _tts_play_next(guild))
+        return
+    # если музыка играет — ставим на паузу
+    if vc.is_playing():
+        try:
+            vc.pause()
+        except:
+            pass
+        # подождать 0.3с
+        def _resume_and_play():
+            try:
+                vc.stop()
+            except:
+                pass
+            _do_tts_play(guild, item, path)
+        bot.loop.call_later(0.5, _resume_and_play)
+    else:
+        _do_tts_play(guild, item, path)
+
+def _do_tts_play(guild: discord.Guild, item: dict, path: str):
+    vc = guild.voice_client
+    if not vc or not vc.is_connected():
+        return
+    try:
+        source = discord.FFmpegPCMAudio(path, before_options="-probesize 32K -analyzeduration 0", options="-vn -loglevel warning")
+        vol = _music_volume.get(guild.id, 0.5)
+        pcm = discord.PCMVolumeTransformer(source, volume=min(1.2, vol + 0.3))
+        def after_tts(err):
+            # удалить файл
+            try:
+                os.remove(path)
+            except:
+                pass
+            if err:
+                print(f"tts after error: {err}")
+            _tts_playing.pop(guild.id, None)
+            # продолжить tts очередь или музыку
+            bot.loop.call_soon_threadsafe(lambda: _tts_play_next(guild))
+        # стопаем всё перед tts
+        if vc.is_playing() or vc.is_paused():
+            try:
+                vc.stop()
+            except:
+                pass
+        vc.play(pcm, after=after_tts)
+        print(f"tts playing: {item.get('text','')[:60]} -> {path}")
+    except Exception as e:
+        print(f"tts play fail: {e}")
+        try:
+            os.remove(path)
+        except:
+            pass
+        _tts_playing.pop(guild.id, None)
+        bot.loop.call_soon_threadsafe(lambda: _tts_play_next(guild))
+
+async def _tts_speak(guild: discord.Guild, text: str, channel_id: int | None = None):
+    if not config.TTS_ENABLED:
+        return
+    vc = guild.voice_client
+    if not vc or not vc.is_connected():
+        return
+    clean = _tts_clean(text)
+    if not clean or len(clean) < 2:
+        return
+    # генерим mp3 через edge-tts
+    try:
+        import edge_tts
+        voice = config.TTS_VOICE
+        rate = config.TTS_RATE
+        communicate = edge_tts.Communicate(clean, voice=voice, rate=rate)
+        tf = _tts_tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tf.close()
+        # таймаут 12с на генерацию
+        await asyncio.wait_for(communicate.save(tf.name), timeout=12)
+        if not os.path.exists(tf.name) or os.path.getsize(tf.name) < 500:
+            print(f"tts gen empty: {tf.name}")
+            try:
+                os.remove(tf.name)
+            except:
+                pass
+            return
+        item = {"path": tf.name, "text": clean, "channel_id": channel_id}
+        _tts_queues[guild.id].append(item)
+        # если ничего не играет — стартуем сразу, иначе встанет в очередь
+        vc2 = guild.voice_client
+        if vc2 and not vc2.is_playing() and not _tts_playing.get(guild.id):
+            _tts_play_next(guild)
+        elif _tts_playing.get(guild.id):
+            pass  # уже играет — в очереди
+        else:
+            # музыка играет — ставим tts в приоритет (пауза музыки и tts)
+            if vc2 and vc2.is_playing() and not _tts_playing.get(guild.id):
+                _tts_play_next(guild)
+    except asyncio.TimeoutError:
+        print(f"tts gen timeout for: {clean[:40]}")
+    except Exception as e:
+        print(f"tts gen fail: {type(e).__name__}: {e}")
+
+# ============ STT (голос -> текст) ============
+_stt_listening: dict[int, bool] = {}  # guild_id -> listening
+
+async def _stt_transcribe(wav_path: str, lang: str = "ru") -> str:
+    # 1) пробуем OpenAI Whisper API если есть ключ
+    oai_key = os.getenv("OPENAI_API_KEY", "") or os.getenv("OPENCODE_API_KEY", "")
+    # openai ключ начинается с sk-
+    if oai_key and oai_key.startswith("sk-"):
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=oai_key)
+            with open(wav_path, "rb") as f:
+                tr = await client.audio.transcriptions.create(model=config.STT_MODEL, file=f, language=lang)
+                return (tr.text or "").strip()
+        except Exception as e:
+            print(f"stt openai fail: {e}")
+    # 2) локальный whisper (faster-whisper) если установлен — опционально
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel("small", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(wav_path, language=lang)
+        text = " ".join([s.text for s in segments]).strip()
+        if text:
+            return text
+    except Exception:
+        pass
+    # 3) fallback — не настроено
+    return ""
+
+def _stt_sink_callback(sink, guild: discord.Guild, text_channel_id: int):
+    # вызывается когда останавливаем запись
+    bot.loop.create_task(_stt_process_sink(sink, guild, text_channel_id))
+
+async def _stt_process_sink(sink, guild: discord.Guild, text_channel_id: int):
+    ch = bot.get_channel(text_channel_id)
+    # sink.audio_data = {user_id: AudioData}
+    for user_id, audio in getattr(sink, "audio_data", {}).items():
+        # пропускаем бота
+        if user_id == bot.user.id:
+            continue
+        # сохраняем wav
+        try:
+            # audio.file — BytesIO wav
+            import wave, io
+            wav_path = _tts_tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+            # sink уже wav, просто скидываем
+            with open(wav_path, "wb") as f:
+                f.write(audio.file.getvalue())
+            if os.path.getsize(wav_path) < 5000:
+                os.remove(wav_path)
+                continue
+            await ch.send(f"🎤 Слышу <@{user_id}> — распознаю…")
+            text = await _stt_transcribe(wav_path, config.STT_LANGUAGE)
+            try:
+                os.remove(wav_path)
+            except:
+                pass
+            if not text or len(text) < 2:
+                await ch.send(f"😶 Не расслышала <@{user_id}> — попробуй ещё раз, говори чётче")
+                continue
+            await ch.send(f"👂 <@{user_id}> сказал: *{text[:300]}*")
+            # кормим в AI как будто он написал в чат
+            # находим имя
+            member = guild.get_member(user_id)
+            name = member.display_name if member else f"User{user_id}"
+            answer = await _ask_ai(text, text_channel_id, name, user_id, guild.name)
+            if answer:
+                await ch.send(answer, allowed_mentions=discord.AllowedMentions(users=False))
+                # авто-озвучка
+                if config.TTS_ENABLED and guild.voice_client and guild.voice_client.is_connected():
+                    await _tts_speak(guild, answer, text_channel_id)
+        except Exception as e:
+            print(f"stt process fail user {user_id}: {e}")
+            try:
+                await ch.send(f"❌ STT ошибка: {e}")
+            except:
+                pass
+
+async def _stt_start(guild: discord.Guild, text_channel_id: int, duration: int = 15):
+    vc = guild.voice_client
+    if not vc or not vc.is_connected():
+        return False, "Бот не в войсе — `Узи зайди` сначала"
+    if _stt_listening.get(guild.id):
+        return False, "Уже слушаю — говори сейчас!"
+    # проверка STT
+    has_key = os.getenv("OPENAI_API_KEY", "").startswith("sk-")
+    has_local = False
+    try:
+        import faster_whisper
+        has_local = True
+    except:
+        pass
+    if not has_key and not has_local:
+        return False, "❌ STT не настроен: добавь `OPENAI_API_KEY=sk-...` в Railway Variables (Whisper) или установи `faster-whisper`. Пока добавь ключ — без него распознавания нет."
+    try:
+        from discord.sinks import WaveSink
+    except Exception as e:
+        return False, f"❌ discord.sinks не доступен: {e} (нужен discord.py[voice]>=2.4 + PyNaCl)"
+    try:
+        sink = WaveSink()
+        vc.start_recording(sink, lambda s: _stt_sink_callback(s, guild, text_channel_id), guild)
+        _stt_listening[guild.id] = True
+        # авто-стоп через duration
+        async def _auto_stop():
+            await asyncio.sleep(duration)
+            if _stt_listening.get(guild.id):
+                await _stt_stop(guild)
+        bot.loop.create_task(_auto_stop())
+        return True, f"🎤 Слушаю {duration}с — говори в микрофон! (язык {config.STT_LANGUAGE})"
+    except Exception as e:
+        return False, f"❌ Не смогла начать запись: {e}"
+
+async def _stt_stop(guild: discord.Guild):
+    vc = guild.voice_client
+    if not vc:
+        return False
+    try:
+        vc.stop_recording()
+    except Exception as e:
+        print(f"stt stop fail: {e}")
+    _stt_listening.pop(guild.id, None)
+    return True
 
 def _music_play_next(guild: discord.Guild):
     q = _music_queues[guild.id]
@@ -872,6 +1132,42 @@ async def _handle_music_triggers(message: discord.Message) -> bool:
             await _music_enqueue(message, q)
             return True
         await _music_enqueue(message, q_raw)
+        return True
+    # TTS: "Узи скажи/говори/озвучь <текст>" — синтез речи в войсе
+    if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["скажи","говори","озвучь","произнеси","сказать"]):
+        if not config.TTS_ENABLED:
+            await message.reply("🔇 TTS выключен (TTS_ENABLED=false).", mention_author=False)
+            return True
+        q_tts = re.sub(r"^(?:анечка|узи|uzi)\s+(?:скажи|говори|озвучь|произнеси|сказать)\s*", "", message.content, flags=re.I).strip()
+        q_tts = re.sub(rf"<@!?{bot.user.id}>", "", q_tts).strip() if bot.user else q_tts
+        if not q_tts:
+            await message.reply("Что сказать? Напиши: `Узи скажи привет, я Узи!`", mention_author=False)
+            return True
+        vc = message.guild.voice_client
+        if not vc or not vc.is_connected():
+            ok = await _music_join(message)
+            if not ok:
+                return True
+        await message.reply(f"🗣️ Озвучиваю: *{q_tts[:120]}*", mention_author=False)
+        await _tts_speak(message.guild, q_tts, message.channel.id)
+        return True
+    # STT: "Узи слушай/послушай [сек]" — начать распознавание голоса
+    if any(low_clean.startswith(n) for n in names) and any(kw in low_clean for kw in ["слушай","послушай","слушать","слушай меня"]):
+        # парсим длительность
+        m = re.search(r"(\d+)", low_clean)
+        dur = int(m.group(1)) if m else 15
+        dur = max(5, min(dur, 60))
+        vc = message.guild.voice_client
+        if not vc or not vc.is_connected():
+            ok = await _music_join(message)
+            if not ok:
+                return True
+        ok, msg_text = await _stt_start(message.guild, message.channel.id, dur)
+        await message.reply(msg_text, mention_author=False)
+        return True
+    if low_clean.startswith(tuple(f"{n} стоп слуш" for n in names)) or low_clean.startswith(tuple(f"{n} хватит слуш" for n in names)):
+        await _stt_stop(message.guild)
+        await message.reply("🛑 Перестала слушать", mention_author=False)
         return True
     if _start_any(names, "стоп", "пауза"):
         if _voice_denied():
@@ -1793,6 +2089,15 @@ async def on_message(message: discord.Message):
             await message.channel.send(f"{message.author.mention} {answer}", allowed_mentions=discord.AllowedMentions(users=True))
         except:
             pass
+    # TTS: авто-озвучка если автор в войсе с ботом и включено
+    if config.TTS_AUTO_VOICE and config.TTS_ENABLED and message.guild and message.guild.voice_client and message.guild.voice_client.is_connected():
+        try:
+            if message.author.voice and message.author.voice.channel and message.guild.voice_client.channel.id == message.author.voice.channel.id:
+                # не озвучиваем ошибки AI
+                if not answer.startswith("❌") and not answer.startswith("⏳"):
+                    bot.loop.create_task(_tts_speak(message.guild, answer, message.channel.id))
+        except Exception as e:
+            print(f"tts auto fail: {e}")
 
     # Команда очистки истории AI (только сам пользователь или админ) — по слову "забудь"
     # не делаем отдельной команды, можно расширить позже
@@ -2482,6 +2787,75 @@ async def slash_skip(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Нечего скипать", ephemeral=True)
 
+@bot.tree.command(name="скажи", description="Узи озвучит текст в войсе (TTS)")
+@app_commands.describe(text="Что сказать (до 300 символов)", voice="Голос")
+@app_commands.choices(voice=[
+    app_commands.Choice(name="Узи (Svetlana)", value="ru-RU-SvetlanaNeural"),
+    app_commands.Choice(name="Дмитрий", value="ru-RU-DmitryNeural"),
+    app_commands.Choice(name="Aria (EN)", value="en-US-AriaNeural"),
+])
+async def slash_say(interaction: discord.Interaction, text: str, voice: str = None):
+    if not config.TTS_ENABLED:
+        await interaction.response.send_message("🔇 TTS выключен", ephemeral=True)
+        return
+    if len(text) > 350:
+        text = text[:350]
+    if interaction.user.voice and interaction.user.voice.channel:
+        vc = interaction.guild.voice_client
+        if not vc or not vc.is_connected():
+            try:
+                await interaction.user.voice.channel.connect()
+            except Exception as e:
+                await interaction.response.send_message(f"❌ Не зашла в войс: {e}", ephemeral=True)
+                return
+    else:
+        await interaction.response.send_message("Зайди в войс сначала! 🚁", ephemeral=True)
+        return
+    if voice:
+        # временно подменяем голос
+        old = config.TTS_VOICE
+        config.TTS_VOICE = voice
+        # не меняем env, только runtime
+    await interaction.response.send_message(f"🗣️ Узи говорит: *{text[:120]}*")
+    try:
+        await _tts_speak(interaction.guild, text, interaction.channel.id)
+    finally:
+        if voice:
+            config.TTS_VOICE = old
+
+@bot.tree.command(name="tts", description="Вкл/выкл авто-озвучку AI (только админ)")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_tts_toggle(interaction: discord.Interaction, enabled: bool):
+    config.TTS_AUTO_VOICE = enabled
+    config.TTS_ENABLED = enabled
+    os.environ["TTS_ENABLED"] = "true" if enabled else "false"
+    os.environ["TTS_AUTO_VOICE"] = "true" if enabled else "false"
+    await interaction.response.send_message(f"✅ TTS {'включен' if enabled else 'выключен'} (авто-озвучка {'вкл' if enabled else 'выкл'})", ephemeral=True)
+
+@bot.tree.command(name="слушай", description="Включить распознавание голоса (STT) на N секунд")
+@app_commands.describe(seconds="Сколько секунд слушать (5-60)")
+async def slash_listen(interaction: discord.Interaction, seconds: int = 15):
+    if not 5 <= seconds <= 60:
+        await interaction.response.send_message("5-60 сек", ephemeral=True)
+        return
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("Зайди в войс! 🚁", ephemeral=True)
+        return
+    vc = interaction.guild.voice_client
+    if not vc or not vc.is_connected():
+        try:
+            await interaction.user.voice.channel.connect()
+        except Exception as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+    ok, msg = await _stt_start(interaction.guild, interaction.channel.id, seconds)
+    await interaction.response.send_message(msg, ephemeral=not ok)
+
+@bot.tree.command(name="стоп-слушай", description="Остановить прослушку")
+async def slash_stop_listen(interaction: discord.Interaction):
+    await _stt_stop(interaction.guild)
+    await interaction.response.send_message("🛑 Стоп слушаю", ephemeral=True)
+
 # ============ BOT APPEARANCE (имя/аватар) ============
 @bot.tree.command(name="set-name", description="Сменить глобальное имя бота (только админ, лимит 2/час)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -2549,6 +2923,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @kick.error
 @ban.error
 @mute.error
+@slash_say.error
+@slash_tts_toggle.error
 async def perm_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ У тебя нет прав для этой команды.", ephemeral=True)
